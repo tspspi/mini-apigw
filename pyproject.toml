@@ -48,3 +48,17 @@ mini-apigw = "gateway.cli:main"
 
 [tool.setuptools-git-versioning]
 enabled = true
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gateway*"]
+exclude = [
+  "tests*",
+  "docs*",
+  "packaging*",
+  "config*",
+  "sql*",
+]
