@@ -1,5 +1,7 @@
 # mini-apigw — Minimal OpenAI‑compatible API Gateway
 
+__WORK IN PROGRESS_
+
 mini-apigw is a small edge gateway that presents an OpenAI‑compatible API surface and routes requests
 to multiple LLM and image generation backends. It is designed for __simplicity__ and ease of control: you
 configure backends and apps in JSON, set policies and cost limits per app, and the gateway handles
