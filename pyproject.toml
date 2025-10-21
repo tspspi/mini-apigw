@@ -1,0 +1,50 @@
+[build-system]
+requires = [
+	"setuptools>=61.0",
+	"wheel",
+	"setuptools-git-versioning"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-apigw"
+dynamic = [ "version" ]
+description = "Minimal OpenAI-compatible edge gateway with multi-backend routing"
+authors = [
+	{ name = "Thomas Spielauer", email = "pypipackages01@tspi.at" }
+]
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = [ "LICENSE.md" ]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "requests>=2.31",
+    "openai>=1.0",
+    "ollama>=0.3",
+    "psycopg2>=2.9.10"
+]
+keywords = [ "API-gateway", "gateway", "API", "LLM" ]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Intended Audience :: Developers",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://www.github.com/tspspi/mini-apigw"
+
+[project.scripts]
+mini-apigw = "gateway.cli:main"
+
+[tool.setuptools-git-versioning]
+enabled = true
