@@ -9,7 +9,6 @@ from .runtime import GatewayRuntime
 
 log = logging.getLogger(__name__)
 
-
 def install_signal_handlers(runtime: GatewayRuntime, enable_reload: bool) -> None:
     loop = asyncio.get_running_loop()
 
@@ -31,6 +30,5 @@ def install_signal_handlers(runtime: GatewayRuntime, enable_reload: bool) -> Non
             loop.add_signal_handler(signal.SIGHUP, _sighup_handler)
         except (AttributeError, NotImplementedError):  # pragma: no cover
             signal.signal(signal.SIGHUP, lambda *_: asyncio.create_task(runtime.reload()))
-
 
 __all__ = ["install_signal_handlers"]

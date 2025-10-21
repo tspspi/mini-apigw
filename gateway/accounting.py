@@ -1,4 +1,5 @@
-"""Usage accounting and Postgres persistence."""
+"""Usage accounting and PostgreSQL backend"""
+
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +23,6 @@ except ImportError:  # pragma: no cover - psycopg optional
         psycopg = None  # type: ignore[assignment]
         _DB_DRIVER_NAME = None
 
-
 @dataclass(slots=True)
 class AccountingRecord:
     app_id: str
@@ -36,14 +36,12 @@ class AccountingRecord:
     latency_ms: Optional[int]
     created_at: datetime = datetime.now(timezone.utc)
 
-
 @dataclass(slots=True)
 class ModelCostState:
     backend: str
     model: str
     total_cost: float = 0.0
     request_count: int = 0
-
 
 @dataclass(slots=True)
 class CostState:
@@ -67,9 +65,7 @@ class AccountingRecorder:
         if db_config is None:
             log.warning("Accounting recorder running without database; usage persisted in-memory only")
         elif psycopg is None:
-            log.warning(
-                "Accounting recorder has database configuration but no Postgres driver (psycopg/psycopg2) is available"
-            )
+            log.warning("Accounting recorder has database configuration but no Postgres driver (psycopg/psycopg2) is available")
         else:
             log.info("Accounting recorder using %s driver for Postgres persistence", self._db_driver_name)
 
@@ -82,7 +78,10 @@ class AccountingRecorder:
         if self._task is None:
             return
         await self._queue.put(None)
-        await self._task
+        try:
+            await self._task
+        except asyncio.CancelledError:  # pragma: no cover - shutdown cancellation
+            pass
         self._task = None
         if self._db_conn is not None:
             try:
@@ -106,13 +105,16 @@ class AccountingRecorder:
         await self._queue.put(record)
 
     async def _worker(self) -> None:
-        while True:
-            record = await self._queue.get()
-            if record is None:
-                break
-            if self._db_config is None:
-                continue
-            await self._write_record(record)
+        try:
+            while True:
+                record = await self._queue.get()
+                if record is None:
+                    break
+                if self._db_config is None:
+                    continue
+                await self._write_record(record)
+        except asyncio.CancelledError:  # pragma: no cover - shutdown cancellation
+            return
 
     async def _write_record(self, record: AccountingRecord) -> None:
         if psycopg is None:

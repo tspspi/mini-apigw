@@ -1,4 +1,5 @@
 """ASGI application factory."""
+
 from __future__ import annotations
 
 import os
@@ -10,6 +11,7 @@ from .api import admin as admin_router
 from .api import v1 as v1_router
 from .config import ConfigError
 from .log import configure_logging
+from .middleware.trace import TraceMiddleware
 from .runtime import GatewayRuntime
 from .signals import install_signal_handlers
 
@@ -35,6 +37,8 @@ def create_app(config_dir: str | os.PathLike[str] | None = None) -> FastAPI:
         openapi_url="/openapi.json",
     )
 
+    # Register all routers
+    app.add_middleware(TraceMiddleware)
     app.include_router(v1_router.router)
     app.include_router(admin_router.router)
 

@@ -1,14 +1,20 @@
-"""Public OpenAI-compatible API layer."""
+"""
+    Public OpenAI-compatible API layer. This does _not_ implement all 
+    features of OpenAI but for the endpoints it implements it supports
+    the same API.
+"""
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Sequence
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..accounting import AccountingRecord
 from ..auth import AuthError
 from ..runtime import GatewayRuntime
+from ..trace import TracePayload
 
 router = APIRouter(prefix="/v1")
 
@@ -61,13 +67,43 @@ async def chat_completions(
 
     if stream:
         if hasattr(result, "as_sse"):
+
             async def iterator():
                 async for chunk in result.as_sse(request_id):
                     yield chunk
-            return StreamingResponse(iterator(), media_type="text/event-stream")
-        return StreamingResponse(result, media_type="text/event-stream")
+
+            stream_response = StreamingResponse(iterator(), media_type="text/event-stream")
+        else:
+            stream_response = StreamingResponse(result, media_type="text/event-stream")
+
+        _attach_trace_payload(
+            request,
+            runtime,
+            app_id=auth.app.app_id,
+            api_key=api_key,
+            operation="chat",
+            model=model,
+            backend=backend,
+            request_payload=payload,
+            response_payload=None,
+            record=record,
+            stream=True,
+        )
+        return stream_response
 
     body = _normalize_chat_response(result.body, request_id, model, backend)
+    _attach_trace_payload(
+        request,
+        runtime,
+        app_id=auth.app.app_id,
+        api_key=api_key,
+        operation="chat",
+        model=model,
+        backend=backend,
+        request_payload=payload,
+        response_payload=body,
+        record=record,
+    )
     return JSONResponse(body)
 
 
@@ -101,6 +137,18 @@ async def completions(
     await runtime.record_usage(record, auth.app.app_id)
 
     body = _normalize_completion_response(result.body, model, backend)
+    _attach_trace_payload(
+        request,
+        runtime,
+        app_id=auth.app.app_id,
+        api_key=api_key,
+        operation="completions",
+        model=model,
+        backend=backend,
+        request_payload=payload,
+        response_payload=body,
+        record=record,
+    )
     return JSONResponse(body)
 
 
@@ -133,6 +181,18 @@ async def embeddings(
     )
     await runtime.record_usage(record, auth.app.app_id)
     body = _normalize_embeddings_response(result.body, model)
+    _attach_trace_payload(
+        request,
+        runtime,
+        app_id=auth.app.app_id,
+        api_key=api_key,
+        operation="embeddings",
+        model=model,
+        backend=backend,
+        request_payload=payload,
+        response_payload=body,
+        record=record,
+    )
     return JSONResponse(body)
 
 
@@ -165,16 +225,74 @@ async def images(
     )
     await runtime.record_usage(record, auth.app.app_id)
     body = result.body
+    image_entries: Optional[Sequence[Dict[str, Any]]] = None
+    if isinstance(body, dict):
+        data = body.get("data")
+        if isinstance(data, Sequence):
+            image_entries = [item for item in data if isinstance(item, dict)]
+    _attach_trace_payload(
+        request,
+        runtime,
+        app_id=auth.app.app_id,
+        api_key=api_key,
+        operation="images",
+        model=model,
+        backend=backend,
+        request_payload=payload,
+        response_payload=body,
+        record=record,
+        image_payloads=image_entries,
+    )
     return JSONResponse(body)
+
+
+def _attach_trace_payload(
+    request: Request,
+    runtime: GatewayRuntime,
+    *,
+    app_id: str,
+    api_key: Optional[str],
+    operation: str,
+    model: str,
+    backend: str,
+    request_payload: Dict[str, Any],
+    response_payload: Any,
+    record: AccountingRecord,
+    stream: bool = False,
+    image_payloads: Optional[Sequence[Dict[str, Any]]] = None,
+) -> None:
+    manager = runtime.trace_manager()
+    if manager is None:
+        return
+    if manager.config_for(app_id) is None:
+        return
+    request.state.trace_payload = TracePayload(
+        app_id=app_id,
+        operation=operation,
+        model=model,
+        backend=backend,
+        request_payload=request_payload,
+        response_payload=response_payload,
+        record=record,
+        api_key=api_key,
+        stream=stream,
+        image_payloads=image_payloads,
+    )
 
 
 @router.get("/models")
 async def models(runtime: GatewayRuntime = Depends(get_runtime)):
+    """
+        This currentlsy is somewhat hacked, TODO as soon as possible
+    """
     payload = runtime.router().build_models_payload()
     return JSONResponse(payload)
 
 
 def _normalize_chat_response(body: Dict[str, Any], request_id: str, model: str, backend: str) -> Dict[str, Any]:
+    """
+        This normalization is needed to work with both ollama and OpenAI backends.
+    """
     if "choices" in body:
         return body
     message = body.get("message") or body.get("messages", [{}])[-1]
@@ -207,6 +325,9 @@ def _normalize_chat_response(body: Dict[str, Any], request_id: str, model: str, 
 
 
 def _normalize_completion_response(body: Dict[str, Any], model: str, backend: str) -> Dict[str, Any]:
+    """
+        This normalization is needed to work with both ollama and OpenAI backends.
+    """
     if "choices" in body:
         return body
     text = body.get("response") or body.get("text")
@@ -222,6 +343,9 @@ def _normalize_completion_response(body: Dict[str, Any], model: str, backend: st
 
 
 def _normalize_embeddings_response(body: Dict[str, Any], model: str) -> Dict[str, Any]:
+    """
+        This normalization is needed to work with both ollama and OpenAI backends.
+    """
     if "data" in body:
         return body
     embedding = body.get("embedding") or []

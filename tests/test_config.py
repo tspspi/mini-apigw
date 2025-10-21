@@ -26,6 +26,23 @@ def test_load_daemon_config(tmp_path: Path):
     assert cfg.reload.enable_sighup is False
 
 
+def test_load_daemon_config_defaults_to_unix_socket(tmp_path: Path):
+    data = {
+        "listen": {},
+        "admin": {"bind": ["127.0.0.1:8081"], "stats_networks": []},
+        "logging": {"level": "INFO"},
+        "reload": {"enable_sighup": True},
+        "timeouts": {"default_connect_s": 10, "default_read_s": 20},
+    }
+    path = tmp_path / "daemon.json"
+    path.write_text(json.dumps(data))
+    cfg = load_daemon_config(path)
+    assert cfg.listen.unix_socket == "/var/llmgw/llmgw.sock"
+    assert cfg.listen.host_v4 is None
+    assert cfg.listen.host_v6 is None
+    assert cfg.listen.port is None
+
+
 def test_load_backends_config(tmp_path: Path):
     data = {
         "aliases": {"chat-default": "gpt-4"},
@@ -46,6 +63,34 @@ def test_load_backends_config(tmp_path: Path):
     cfg = load_backends_config(path)
     assert cfg.backends[0].name == "openai-primary"
     assert cfg.backends[0].supports.chat == ["gpt-4"]
+
+
+def test_load_apps_config_trace_options(tmp_path: Path):
+    data = {
+        "apps": [
+            {
+                "app_id": "trace-app",
+                "api_keys": ["sk-trace"],
+                "trace": {
+                    "file": "/var/log/llmgw/app.jsonl",
+                    "imagedir": "/var/log/llmgw/images",
+                    "includeprompts": True,
+                    "includeresponse": True,
+                    "includekeys": True
+                }
+            }
+        ]
+    }
+    path = tmp_path / "apps.json"
+    path.write_text(json.dumps(data))
+    cfg = load_apps_config(path)
+    app = cfg.apps[0]
+    assert app.trace is not None
+    assert app.trace.file == "/var/log/llmgw/app.jsonl"
+    assert app.trace.image_dir == "/var/log/llmgw/images"
+    assert app.trace.include_prompts is True
+    assert app.trace.include_response is True
+    assert app.trace.include_keys is True
 
 
 def test_load_apps_config_requires_key(tmp_path: Path):

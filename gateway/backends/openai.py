@@ -1,12 +1,8 @@
-"""OpenAI backend client."""
 from __future__ import annotations
 
 from typing import Any, Dict
-
 from openai import OpenAI
-
 from .base import BackendClient, BackendResult, BackendUsage
-
 
 class OpenAIBackend(BackendClient):
     def __init__(self, definition):

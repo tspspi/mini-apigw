@@ -13,7 +13,6 @@ from .backends import BackendClient
 class SchedulingError(RuntimeError):
     pass
 
-
 class SequenceGroup:
     def __init__(self, name: str):
         self.name = name
@@ -43,7 +42,6 @@ class SequenceGroup:
             if not next_fut.done():
                 next_fut.set_result(None)
 
-
 class _SequenceTicket:
     def __init__(self, group: SequenceGroup):
         self._group = group
@@ -53,7 +51,6 @@ class _SequenceTicket:
 
     async def __aexit__(self, exc_type, exc, tb):
         await self._group._release()
-
 
 @dataclass
 class BackendRuntime:
@@ -78,7 +75,6 @@ class BackendRuntime:
         self.in_flight = max(0, self.in_flight - 1)
         self.semaphore.release()
 
-
 class BackendTicket:
     def __init__(self, runtime: BackendRuntime, sequence_ticket: Optional[_SequenceTicket]):
         self._runtime = runtime
@@ -91,7 +87,6 @@ class BackendTicket:
         self._runtime.release()
         if self._sequence_ticket is not None:
             await self._sequence_ticket.__aexit__(exc_type, exc, tb)
-
 
 class Scheduler:
     """Coordinates backend execution and exposes stats."""
@@ -132,6 +127,5 @@ class Scheduler:
             for name, group in self._groups.items()
         }
         return {"per_backend": per_backend, "per_group": per_group}
-
 
 __all__ = ["Scheduler", "SchedulingError"]

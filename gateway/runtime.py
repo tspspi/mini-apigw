@@ -15,6 +15,7 @@ from .config import ConfigBundle, ConfigError, ConfigManager
 from .policies import PolicyDecision, PolicyEngine
 from .routing import ModelRouter, RoutingError
 from .scheduling import Scheduler
+from .trace import TraceManager
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class GatewayRuntime:
         self._auth_manager: Optional[AuthManager] = None
         self._policy_engine = PolicyEngine()
         self._accounting: Optional[AccountingRecorder] = None
+        self._trace_manager: Optional[TraceManager] = None
         self._lock = asyncio.Lock()
 
     @property
@@ -66,6 +68,7 @@ class GatewayRuntime:
         self._router = ModelRouter(bundle.backends)
         self._scheduler = Scheduler(bundle.backends, backends)
         self._auth_manager = AuthManager(bundle.apps)
+        self._trace_manager = TraceManager(bundle.apps)
         self._bundle = bundle
         self._accounting = AccountingRecorder(bundle.daemon.database)
         await self._accounting.start()
@@ -75,6 +78,7 @@ class GatewayRuntime:
         if self._accounting is not None:
             await self._accounting.stop()
             self._accounting = None
+        self._trace_manager = None
         self._backends = {}
         self._router = None
         self._scheduler = None
@@ -98,6 +102,9 @@ class GatewayRuntime:
         if self._scheduler is None:
             raise RuntimeError("Scheduler not initialized")
         return self._scheduler
+
+    def trace_manager(self) -> Optional[TraceManager]:
+        return self._trace_manager
 
     def backend_client(self, backend_name: str) -> BackendClient:
         try:

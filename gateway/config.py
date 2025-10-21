@@ -21,15 +21,17 @@ class ConfigError(RuntimeError):
 
 @dataclass(slots=True)
 class ListenConfig:
-    """IP and port specification to listen on
+    """Listener configuration for the public API endpoint.
 
-    This specifies which IP adresses and port the server should listen
-    at. At the moment supports IPv4 (host_v4), IPv6 (host_v6) and a
-    port specification."""
+    When neither ``host_v4`` nor ``host_v6`` are provided the service falls back to
+    listening on a Unix domain socket. The default socket path mirrors the systemd
+    style layout under ``/var/llmgw`` but can be overridden through configuration or
+    CLI flags."""
 
-    host_v4: str = "0.0.0.0"
-    host_v6: str = "::"
-    port: int = 8080
+    host_v4: Optional[str] = None
+    host_v6: Optional[str] = None
+    port: Optional[int] = None
+    unix_socket: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -194,12 +196,22 @@ class AppPolicy:
 
 
 @dataclass(slots=True)
+class AppTraceConfig:
+    file: Optional[str] = None
+    image_dir: Optional[str] = None
+    include_prompts: bool = False
+    include_response: bool = False
+    include_keys: bool = False
+
+
+@dataclass(slots=True)
 class AppDefinition:
     app_id: str
     name: Optional[str] = None
     api_keys: List[str] = field(default_factory=list)
     policy: AppPolicy = field(default_factory=AppPolicy)
     cost_limit: Optional[CostLimitConfig] = None
+    trace: Optional[AppTraceConfig] = None
 
 
 @dataclass(slots=True)
@@ -364,12 +376,27 @@ def _load_app_policy(raw: Mapping[str, Any]) -> AppPolicy:
     )
 
 
+def _load_app_trace_config(raw: Mapping[str, Any]) -> AppTraceConfig:
+    return AppTraceConfig(
+        file=str(raw["file"]) if raw.get("file") is not None else None,
+        image_dir=str(raw["imagedir"]) if raw.get("imagedir") is not None else None,
+        include_prompts=bool(raw.get("includeprompts", False)),
+        include_response=bool(raw.get("includeresponse", False)),
+        include_keys=bool(raw.get("includekeys", False)),
+    )
+
+
 def _load_app_definition(raw: Mapping[str, Any]) -> AppDefinition:
     policy = _load_app_policy(_load_mapping(raw.get("policy"), "policy"))
     cost_limit_raw = raw.get("cost_limit")
     cost_limit = None
     if cost_limit_raw is not None:
         cost_limit = _load_cost_limit(_load_mapping(cost_limit_raw, "cost_limit"))
+
+    trace_raw = raw.get("trace")
+    trace = None
+    if trace_raw is not None:
+        trace = _load_app_trace_config(_load_mapping(trace_raw, "trace"))
 
     api_keys_raw = _load_list(raw.get("api_keys"), "api_keys")
     if not api_keys_raw:
@@ -381,6 +408,7 @@ def _load_app_definition(raw: Mapping[str, Any]) -> AppDefinition:
         api_keys=[str(key) for key in api_keys_raw],
         policy=policy,
         cost_limit=cost_limit,
+        trace=trace,
     )
 
 
@@ -407,10 +435,31 @@ def load_daemon_config(path: Path) -> DaemonConfig:
     reload_raw = _load_mapping(_expect(dict(data), "reload", "daemon"), "reload")
     timeouts_raw = _load_mapping(_expect(dict(data), "timeouts", "daemon"), "timeouts")
 
+    host_v4_value = listen_raw.get("host_v4")
+    host_v6_value = listen_raw.get("host_v6")
+    unix_socket_value = listen_raw.get("unix_socket")
+    port_value = listen_raw.get("port")
+
+    host_v4 = str(host_v4_value) if host_v4_value is not None else None
+    host_v6 = str(host_v6_value) if host_v6_value is not None else None
+
+    port: Optional[int]
+    if port_value is not None:
+        port = int(port_value)
+    elif host_v4 or host_v6:
+        port = 8080
+    else:
+        port = None
+
+    unix_socket = str(unix_socket_value) if unix_socket_value is not None else None
+    if unix_socket is None and not host_v4 and not host_v6:
+        unix_socket = "/var/llmgw/llmgw.sock"
+
     listen = ListenConfig(
-        host_v4=str(listen_raw.get("host_v4", "0.0.0.0")),
-        host_v6=str(listen_raw.get("host_v6", "::")),
-        port=int(listen_raw.get("port", 8080)),
+        host_v4=host_v4,
+        host_v6=host_v6,
+        port=port,
+        unix_socket=unix_socket,
     )
 
     admin = AdminConfig(
@@ -502,6 +551,7 @@ __all__ = [
     "AdminConfig",
     "AppDefinition",
     "AppPolicy",
+    "AppTraceConfig",
     "AppsConfig",
     "BackendConfig",
     "BackendCostConfig",
