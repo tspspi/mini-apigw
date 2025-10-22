@@ -168,6 +168,9 @@ Daemonize with defaults from `daemon.json` (port/host or Unix socket):
 mini-apigw start --config-dir ./config
 ```
 
+This detached mode uses [`daemonize`](https://pypi.org/project/daemonize/) and writes a PID file to
+`<config-dir>/mini-apigw.pid` so service managers can track the running process.
+
 Override listener explicitly:
 
 ```bash
@@ -181,8 +184,25 @@ Admin helpers (call built‑in admin endpoints):
 ```bash
 mini-apigw reload --config-dir ./config
 mini-apigw stop --config-dir ./config
+# explicitly talk to a Unix domain socket if you override the listener at runtime
+mini-apigw stop --config-dir ./config --unix-socket /var/llmgw/llmgw.sock
 mini-apigw token --bytes 32   # generate a random API key
 ```
+
+### FreeBSD rc(8)
+
+A sample rc script lives in `dist/freebsd/rc.d/mini_apigw`. Install it as
+`/usr/local/etc/rc.d/mini_apigw`, make it executable and enable it in `rc.conf`:
+
+```sh
+sysrc mini_apigw_enable=YES
+sysrc mini_apigw_config_dir=/usr/local/etc/mini-apigw
+sysrc mini_apigw_user=www          # or another dedicated account
+```
+
+The script delegates to the CLI (`mini-apigw start|stop|reload|status`) and uses the PID file in the
+configuration directory by default. Set `mini_apigw_unix_socket` if you expose the public listener via
+UDS.
 
 ## OpenAI‑Compatible API
 

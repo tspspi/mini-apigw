@@ -1,0 +1,92 @@
+#!/bin/sh
+# PROVIDE: mini_apigw
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="mini_apigw"
+rcvar="mini_apigw_enable"
+
+load_rc_config $name
+
+: ${mini_apigw_enable:="NO"}
+: ${mini_apigw_command:="/usr/local/bin/mini-apigw"}
+: ${mini_apigw_config_dir:="/usr/local/etc/mini-apigw"}
+: ${mini_apigw_user:="mini-apigw"}
+: ${mini_apigw_pidfile:="${mini_apigw_config_dir}/mini-apigw.pid"}
+: ${mini_apigw_unix_socket:="${mini_apigw_config_dir}/mini-apigw.sock"}
+: ${mini_apigw_flags:=""}
+: ${mini_apigw_timeout:="10"}
+
+command="${mini_apigw_command}"
+pidfile="${mini_apigw_pidfile}"
+required_files="${mini_apigw_config_dir}/daemon.json"
+extra_commands="reload status"
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+reload_cmd="${name}_reload"
+status_cmd="${name}_status"
+
+mini_apigw_build_args()
+{
+	_subcmd="$1"
+	shift
+	_cmd="${command} ${_subcmd} --config-dir \"${mini_apigw_config_dir}\""
+	if [ -n "${mini_apigw_unix_socket}" ]; then
+		_cmd="${_cmd} --unix-socket \"${mini_apigw_unix_socket}\""
+	fi
+	for _arg in "$@"; do
+		_cmd="${_cmd} ${_arg}"
+	done
+	if [ -n "${mini_apigw_flags}" ]; then
+		_cmd="${_cmd} ${mini_apigw_flags}"
+	fi
+	echo "${_cmd}"
+}
+
+mini_apigw_run()
+{
+	_cmd=$(mini_apigw_build_args "$@")
+	if [ "$(id -un)" = "${mini_apigw_user}" ]; then
+		/bin/sh -c "${_cmd}"
+	else
+		su -m "${mini_apigw_user}" -c "${_cmd}"
+	fi
+}
+
+mini_apigw_start()
+{
+	mini_apigw_run start
+}
+
+mini_apigw_stop()
+{
+	mini_apigw_run stop --timeout "${mini_apigw_timeout}"
+}
+
+mini_apigw_reload()
+{
+	mini_apigw_run reload --timeout "${mini_apigw_timeout}"
+}
+
+mini_apigw_status()
+{
+	if [ ! -f "${pidfile}" ]; then
+		echo "${name} is not running"
+		return 1
+	fi
+	_pid=$(cat "${pidfile}" 2>/dev/null)
+	if [ -z "${_pid}" ]; then
+		echo "${name} pidfile exists but is empty"
+		return 1
+	fi
+	if kill -0 "${_pid}" 2>/dev/null; then
+		echo "${name} running as pid ${_pid}"
+		return 0
+	fi
+	echo "${name} pidfile exists but process not running"
+	return 1
+}
+
+run_rc_command "$1"

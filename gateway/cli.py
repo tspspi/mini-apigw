@@ -6,13 +6,12 @@ import argparse
 import os
 import secrets
 import sys
-import time
-from multiprocessing import Process
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
-import requests
+import httpx
 import uvicorn
+from daemonize import Daemonize
 
 from .app import create_app
 from .config import ConfigError, DaemonConfig, load_daemon_config
@@ -75,18 +74,59 @@ def _start_background(
     reload_enabled: bool,
     log_level: str,
 ) -> None:
-    process = Process(
-        target=_serve_uvicorn,
-        args=(str(cfg_dir), host, port, uds, reload_enabled, log_level),
-        daemon=False,
-    )
-    process.start()
-    time.sleep(0.1)
-    if process.exitcode not in (None, 0):
-        print("[error] Gateway process terminated during start-up", file=sys.stderr)
-        sys.exit(process.exitcode or 1)
     desc = f"unix:{uds}" if uds else f"http://{host}:{port}"
-    print(f"mini-apigw started in background (PID {process.pid}) listening on {desc}")
+    pid_path = cfg_dir / "mini-apigw.pid"
+
+    def _pid_is_active(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    if pid_path.exists():
+        try:
+            existing_pid = int(pid_path.read_text().strip())
+        except (OSError, ValueError):
+            existing_pid = None
+        if existing_pid and _pid_is_active(existing_pid):
+            print(
+                f"[error] mini-apigw appears to be running already (PID {existing_pid})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            pid_path.unlink()
+        except OSError as exc:
+            print(f"[warning] Failed to remove stale pidfile {pid_path}: {exc}", file=sys.stderr)
+
+    def _run_server() -> None:
+        try:
+            _serve_uvicorn(str(cfg_dir), host, port, uds, reload_enabled, log_level)
+        finally:
+            try:
+                pid_path.unlink()
+            except OSError:
+                pass
+
+    daemon = Daemonize(app="mini-apigw", pid=str(pid_path), action=_run_server)
+    try:
+        daemon.start()
+    except Exception as exc:  # pragma: no cover - daemonization failure
+        print(f"[error] Failed to daemonize mini-apigw: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    pid_info = ""
+    try:
+        pid_text = pid_path.read_text().strip()
+        if pid_text:
+            pid_info = f" (PID {pid_text})"
+    except OSError:
+        pid_info = ""
+
+    print(f"mini-apigw started in background{pid_info} listening on {desc} (pidfile {pid_path})")
 
 def _determine_listen_target(
     args: argparse.Namespace, daemon_cfg: DaemonConfig
@@ -152,10 +192,40 @@ def _admin_base_url(daemon_cfg: DaemonConfig) -> str:
         return f"http://{host}:{port}"
     raise ConfigError("No usable admin.bind entries configured")
 
-def _perform_admin_action(url: str, timeout: float) -> None:
+
+def _resolve_admin_endpoint(
+    args: argparse.Namespace,
+    daemon_cfg: DaemonConfig,
+) -> Tuple[str, Optional[str]]:
+    admin_url = getattr(args, "admin_url", None)
+    unix_socket_override = getattr(args, "unix_socket", None)
+
+    if admin_url and unix_socket_override:
+        raise ConfigError("Cannot combine --admin-url with --unix-socket")
+
+    if admin_url:
+        return admin_url.rstrip("/"), None
+
+    if unix_socket_override:
+        return "http://unix", unix_socket_override
+
+    listen_cfg = daemon_cfg.listen
+    if listen_cfg.unix_socket:
+        return "http://unix", listen_cfg.unix_socket
+
+    return _admin_base_url(daemon_cfg), None
+
+def _perform_admin_action(url: str, timeout: float, uds: Optional[str]) -> None:
+    transport: Optional[httpx.BaseTransport]
+    if uds:
+        transport = httpx.HTTPTransport(uds=uds)
+    else:
+        transport = None
+
     try:
-        response = requests.post(url, timeout=timeout)
-    except requests.RequestException as exc:
+        with httpx.Client(timeout=timeout, transport=transport) as client:
+            response = client.post(url)
+    except (httpx.HTTPError, OSError) as exc:
         print(f"[error] Admin request failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -214,9 +284,14 @@ def _command_reload(args: argparse.Namespace) -> None:
         print(f"[error] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    base_url = args.admin_url or _admin_base_url(daemon_cfg)
+    try:
+        base_url, uds = _resolve_admin_endpoint(args, daemon_cfg)
+    except ConfigError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        sys.exit(1)
+
     url = f"{base_url.rstrip('/')}/admin/reload"
-    _perform_admin_action(url, args.timeout)
+    _perform_admin_action(url, args.timeout, uds)
 
 def _command_stop(args: argparse.Namespace) -> None:
     cfg_dir = _resolve_config_dir(args.config_dir)
@@ -226,9 +301,14 @@ def _command_stop(args: argparse.Namespace) -> None:
         print(f"[error] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    base_url = args.admin_url or _admin_base_url(daemon_cfg)
+    try:
+        base_url, uds = _resolve_admin_endpoint(args, daemon_cfg)
+    except ConfigError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        sys.exit(1)
+
     url = f"{base_url.rstrip('/')}/admin/shutdown"
-    _perform_admin_action(url, args.timeout)
+    _perform_admin_action(url, args.timeout, uds)
 
 
 def _command_token(args: argparse.Namespace) -> None:
@@ -256,12 +336,14 @@ def main() -> None:
     reload_parser = subparsers.add_parser("reload", help="Reload gateway configuration")
     reload_parser.add_argument("--config-dir", help="Directory containing configuration files")
     reload_parser.add_argument("--admin-url", help="Override admin base URL (e.g. http://127.0.0.1:8081)")
+    reload_parser.add_argument("--unix-socket", help="Path to Unix domain socket for admin endpoint")
     reload_parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
     reload_parser.set_defaults(func=_command_reload)
 
     stop_parser = subparsers.add_parser("stop", help="Request a graceful shutdown")
     stop_parser.add_argument("--config-dir", help="Directory containing configuration files")
     stop_parser.add_argument("--admin-url", help="Override admin base URL (e.g. http://127.0.0.1:8081)")
+    stop_parser.add_argument("--unix-socket", help="Path to Unix domain socket for admin endpoint")
     stop_parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
     stop_parser.set_defaults(func=_command_stop)
 
