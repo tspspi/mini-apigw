@@ -56,6 +56,7 @@ class LoggingConfig:
     level: str = "INFO"
     redact_prompts: bool = True
     access_log: bool = True
+    file: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -471,6 +472,11 @@ def load_daemon_config(path: Path) -> DaemonConfig:
         level=str(logging_raw.get("level", "INFO")),
         redact_prompts=bool(logging_raw.get("redact_prompts", True)),
         access_log=bool(logging_raw.get("access_log", True)),
+        file=(
+            str(logging_raw.get("file"))
+            if logging_raw.get("file") is not None
+            else None
+        ),
     )
 
     reload_cfg = ReloadConfig(enable_sighup=bool(reload_raw.get("enable_sighup", True)))

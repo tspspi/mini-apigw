@@ -14,6 +14,22 @@ def configure_logging(config: LoggingConfig) -> None:
     level = getattr(logging, config.level.upper(), logging.INFO)
     log_format = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
+    handler_config = {
+        "level": level,
+        "formatter": "standard",
+    }
+
+    if config.file:
+        handler_config.update(
+            {
+                "class": "logging.handlers.WatchedFileHandler",
+                "filename": config.file,
+                "encoding": "utf-8",
+            }
+        )
+    else:
+        handler_config["class"] = "logging.StreamHandler"
+
     dictConfig(
         {
             "version": 1,
@@ -24,11 +40,7 @@ def configure_logging(config: LoggingConfig) -> None:
                 }
             },
             "handlers": {
-                "default": {
-                    "level": level,
-                    "class": "logging.StreamHandler",
-                    "formatter": "standard",
-                }
+                "default": handler_config,
             },
             "root": {
                 "handlers": ["default"],

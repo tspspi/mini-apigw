@@ -73,9 +73,27 @@ def _start_background(
     uds: Optional[str],
     reload_enabled: bool,
     log_level: str,
+    log_file: Optional[str],
 ) -> None:
     desc = f"unix:{uds}" if uds else f"http://{host}:{port}"
     pid_path = cfg_dir / "mini-apigw.pid"
+    log_path: Optional[Path] = None
+
+    if log_file:
+        candidate = Path(log_file)
+        if not candidate.is_absolute():
+            candidate = (cfg_dir / candidate).resolve()
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            with candidate.open("a", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            print(
+                f"[error] Unable to prepare log file {candidate}: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        log_path = candidate
 
     def _pid_is_active(pid: int) -> bool:
         try:
@@ -103,15 +121,38 @@ def _start_background(
             print(f"[warning] Failed to remove stale pidfile {pid_path}: {exc}", file=sys.stderr)
 
     def _run_server() -> None:
+        log_handle = None
         try:
+            if log_path:
+                try:
+                    log_handle = log_path.open("a", buffering=1, encoding="utf-8")
+                except OSError as exc:
+                    print(
+                        f"[error] Unable to open log file {log_path}: {exc}",
+                        file=sys.stderr,
+                    )
+                    return
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os.dup2(log_handle.fileno(), sys.stdout.fileno())
+                os.dup2(log_handle.fileno(), sys.stderr.fileno())
             _serve_uvicorn(str(cfg_dir), host, port, uds, reload_enabled, log_level)
         finally:
-            try:
-                pid_path.unlink()
-            except OSError:
-                pass
+            if log_handle:
+                try:
+                    log_handle.flush()
+                except OSError:
+                    pass
+                try:
+                    log_handle.close()
+                except OSError:
+                    pass
 
-    daemon = Daemonize(app="mini-apigw", pid=str(pid_path), action=_run_server)
+    daemon = Daemonize(
+        app="mini-apigw",
+        pid=str(pid_path),
+        action=_run_server,
+    )
     try:
         daemon.start()
     except Exception as exc:  # pragma: no cover - daemonization failure
@@ -126,7 +167,10 @@ def _start_background(
     except OSError:
         pid_info = ""
 
-    print(f"mini-apigw started in background{pid_info} listening on {desc} (pidfile {pid_path})")
+    log_suffix = f", logging to {log_path}" if log_path else ""
+    print(
+        f"mini-apigw started in background{pid_info} listening on {desc} (pidfile {pid_path}{log_suffix})"
+    )
 
 def _determine_listen_target(
     args: argparse.Namespace, daemon_cfg: DaemonConfig
@@ -274,7 +318,15 @@ def _command_start(args: argparse.Namespace) -> None:
         _serve_uvicorn(str(cfg_dir), host, port, uds, reload_enabled, log_level)
         return
 
-    _start_background(cfg_dir, host, port, uds, reload_enabled, log_level)
+    _start_background(
+        cfg_dir,
+        host,
+        port,
+        uds,
+        reload_enabled,
+        log_level,
+        daemon_cfg.logging.file,
+    )
 
 def _command_reload(args: argparse.Namespace) -> None:
     cfg_dir = _resolve_config_dir(args.config_dir)

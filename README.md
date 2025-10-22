@@ -64,7 +64,12 @@ Example `daemon.json` (minimal, no persistent accounting log):
 {
   "listen": { "host_v4": "0.0.0.0", "port": 8080 },
   "admin": { "bind": ["127.0.0.1:8081", "[::1]:8081"], "stats_networks": ["127.0.0.1/32", "::1/128"] },
-  "logging": { "level": "INFO", "redact_prompts": true, "access_log": true },
+  "logging": {
+    "level": "INFO",
+    "redact_prompts": true,
+    "access_log": true,
+    "file": "/var/log/mini-apigw.log"
+  },
   "reload": { "enable_sighup": true },
   "timeouts": { "default_connect_s": 60, "default_read_s": 600 },
   "database": null
@@ -170,6 +175,8 @@ mini-apigw start --config-dir ./config
 
 This detached mode uses [`daemonize`](https://pypi.org/project/daemonize/) and writes a PID file to
 `<config-dir>/mini-apigw.pid` so service managers can track the running process.
+Set `logging.file` in `daemon.json` to mirror daemon stdout/stderr and the configured logging stream to a
+specific file (paths relative to `config-dir` are resolved automatically).
 
 Override listener explicitly:
 
