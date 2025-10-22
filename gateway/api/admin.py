@@ -34,13 +34,23 @@ def _require_local_access(request: Request, runtime: GatewayRuntime) -> None:
         adresses or the unix domain socket.
     """
     client = request.client
+    listen_cfg = runtime.config_bundle.daemon.listen
+
     if client is None:
+        if listen_cfg.unix_socket:
+            return
         raise HTTPException(status_code=403, detail="Forbidden")
+
     host = client.host
     if host in {"127.0.0.1", "::1"}:
         return
+
     allowlist = runtime.config_bundle.daemon.admin.stats_networks
     if not allowlist:
+        if listen_cfg.unix_socket:
+            # When running behind a reverse proxy on a unix domain socket we
+            # trust the proxy to enforce access control.
+            return
         raise HTTPException(status_code=403, detail="Forbidden")
     if not is_allowed(host, allowlist):
         raise HTTPException(status_code=403, detail="Forbidden")

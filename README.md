@@ -149,8 +149,8 @@ Notes:
   restrict models, and `cost_limit` to enforce soft limits. Per‑app traces can be persisted
   as JSONL with optional image capture.
 - The admin interface binds on the same port (due to limitations in FastAPI code and simplicity).
-  It is restricted to localhost by default, beware of limitations of this kind of filtering
-  when running local jails; additional networks can be allow‑listed with CIDRs in `admin.stats_networks`.
+  It is restricted to localhost by default; when running local jails use CIDRs in `admin.stats_networks`.
+  If you expose the service through a Unix domain socket the gateway assumes a local reverse proxy enforces access control, so configure that proxy accordingly.
 
 ## Running
 
@@ -267,6 +267,44 @@ with `admin.stats_networks` CIDR allow‑lists.
 
 The `mini-apigw reload` and `stop` CLI commands call these endpoints using the admin
 bind defined in `daemon.json`.
+
+When the gateway listens on a Unix domain socket (via `listen.unix_socket` or the
+`--unix-socket` CLI flag) every request that reaches the socket is treated as trusted.
+Place a local reverse proxy in front of the socket to enforce network access rules
+for the public API as well as the admin/statistics endpoints.
+
+For Apache HTTPD the following configuration proxies all API traffic through the socket:
+
+```apache
+<VirtualHost *:80>
+        ServerName host.example.com
+        ServerAdmin complains@example.com
+
+        DocumentRoot /usr/www/host.example.com/www/
+
+        ProxyPass        /       "unix:/var/run/miniapigw.sock|http://localhost/"
+        ProxyPassReverse /       "unix:/var/run/miniapigw.sock|http://localhost/"
+</VirtualHost>
+```
+
+If you also need HTTP authentication for administrators, Apache combines multiple `Require` directives with a logical AND by default. Wrap them in `<RequireAll>` to make that explicit:
+
+```apache
+<LocationMatch "^/(admin|stats)">
+        AuthType Basic
+        AuthName "mini-apigw admin"
+        AuthUserFile "/usr/local/etc/httpd/miniapigw-admin.htpasswd"
+        <RequireAll>
+                Require valid-user
+                Require ip 127.0.0.1 ::1 192.0.2.0/24
+        </RequireAll>
+</LocationMatch>
+```
+
+Adjust the `Require ip` list or wrap several blocks in `<RequireAny>` when you want to allow either a subnet or authenticated users.
+
+Make sure the proxy only exposes the endpoints you intend to make reachable:
+`/v1/…` for OpenAI-compatible APIs and `/admin`/`/stats` only to trusted administrators.
 
 Note that at this moment this means any local user can control shutdown and reload! This 
 is __work in progress__
