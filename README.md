@@ -32,6 +32,8 @@ does not implement the full OpenAI API - it just passes through the above mentio
 endpoints. In addition it uses local API keys. Those API keys are used to select the application
 from ```apps.json``` configuration file. 
 
+For more details about the rational and application there is a [blog post](https://www.tspi.at/2025/10/25/miniapigw.html)
+
 ## Installation
 
 From PyPI (recommended):
