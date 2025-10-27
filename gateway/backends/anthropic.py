@@ -233,27 +233,26 @@ class AnthropicBackend(BackendClient):
 
         converted: List[Dict[str, Any]] = []
         tool_id_map: Dict[str, str] = {}
+        pending_tool_results: List[Dict[str, Any]] = []
 
         for original in messages:
             if not isinstance(original, dict):
                 continue
             role = original.get("role")
+            if pending_tool_results and role != "tool":
+                converted.append({"role": "user", "content": list(pending_tool_results)})
+                pending_tool_results.clear()
             if role == "assistant":
                 converted.append(self._convert_assistant_message(original, tool_id_map))
             elif role == "tool":
                 tool_block = self._convert_tool_message(original, tool_id_map)
                 if tool_block:
-                    if converted and converted[-1].get("_gateway_tool_results"):
-                        converted[-1]["content"].append(tool_block)
-                    else:
-                        converted.append(
-                            {"role": "user", "content": [tool_block], "_gateway_tool_results": True}
-                        )
+                    pending_tool_results.append(tool_block)
             else:
                 converted.append(self._convert_default_message(original))
 
-        for message in converted:
-            message.pop("_gateway_tool_results", None)
+        if pending_tool_results:
+            converted.append({"role": "user", "content": list(pending_tool_results)})
 
         return converted
 
@@ -283,19 +282,8 @@ class AnthropicBackend(BackendClient):
                     if isinstance(call_id, str):
                         tool_id_map.setdefault(call_id, call_id)
 
-        if not blocks:
-            text_content = message.get("content")
-            if isinstance(text_content, str) and text_content.strip():
-                blocks = [{"type": "text", "text": text_content}]
-            elif text_content is not None and not isinstance(text_content, str):
-                text_value = str(text_content)
-                if text_value:
-                    blocks = [{"type": "text", "text": text_value}]
-            elif tool_calls:
-                # Tool calls should already have produced tool_use blocks; leave empty.
-                pass
-            else:
-                blocks = [{"type": "text", "text": " "}]
+        if not blocks and not tool_calls:
+            blocks = [{"type": "text", "text": " "}]
 
         new_message["content"] = blocks
         return new_message
@@ -373,16 +361,7 @@ class AnthropicBackend(BackendClient):
         }
 
     def _convert_tool_result_content(self, content: Any) -> List[Dict[str, Any]]:
-        if content is None:
-            return []
-        if isinstance(content, str):
-            return [{"type": "text", "text": content}]
-        if isinstance(content, list):
-            blocks = self._as_blocks(content, allow_empty=True)
-            return blocks
-        if isinstance(content, dict) and content.get("type"):
-            return [content]
-        return [{"type": "text", "text": str(content)}]
+        return self._as_blocks(content, allow_empty=True)
 
     def _as_blocks(self, content: Any, allow_empty: bool = False) -> List[Dict[str, Any]]:
         blocks: List[Dict[str, Any]] = []
@@ -390,13 +369,21 @@ class AnthropicBackend(BackendClient):
             for item in content:
                 if isinstance(item, dict) and item.get("type"):
                     blocks.append(item)
-                elif isinstance(item, str) and item.strip():
-                    blocks.append({"type": "text", "text": item})
+                elif isinstance(item, str):
+                    stripped = item.strip()
+                    if stripped:
+                        blocks.append({"type": "text", "text": item})
+                elif item is not None:
+                    text_value = str(item)
+                    if text_value:
+                        blocks.append({"type": "text", "text": text_value})
         elif isinstance(content, dict) and content.get("type"):
             blocks.append(content)
-        elif isinstance(content, str) and content.strip():
-            blocks.append({"type": "text", "text": content})
-        elif content is not None and not isinstance(content, str):
+        elif isinstance(content, str):
+            stripped = content.strip()
+            if stripped:
+                blocks.append({"type": "text", "text": content})
+        elif content is not None:
             text_value = str(content)
             if text_value:
                 blocks.append({"type": "text", "text": text_value})
