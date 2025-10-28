@@ -18,10 +18,11 @@ Backends included out of the box:
 
 * OpenAI
 * Ollama
+* Anthropic
+* xAI
 
 In development:
 
-* Anthropic
 * Fooocus
 * vLLM
 
@@ -93,6 +94,37 @@ Example `backends.json` (mixed OpenAI + Ollama):
       "concurrency": 4,
       "supports": { "chat": ["gpt-4o-mini"], "embeddings": ["text-embedding-3-small"], "images": ["gpt-image-1", "dall-e-3"] },
       "cost": { "currency": "usd", "unit": "1k_tokens", "models": { "gpt-4o-mini": {"prompt": 0.002, "completion": 0.004} } }
+    },
+    {
+      "type" : "anthropic",
+      "name" : "anthropic-primary",
+      "base_url" : "https://api.anthropic.com",
+      "api_key" : "<anthropic_key>",
+      "concurrency" : 4,
+      "supports" : { "chat": [ "claude-opus-4.1", "claude-haiku-4-5", "claude-sonnet-4-5" ] },
+      "cost" : { "currency": "usd", "unit": "1k_tokens", "models": { "claude-opus-4-1" : { "prompt" : 0.075, "completion" : 0.075 }, "claude-sonnet-4-5" : { "prompt" : 0.0003, "completion" : 0.0003 }, "claude-haiku-4-5" : { "prompt" : 0.001, "completion" : 0.001 } } }
+    },
+    {
+      "type" : "xai",
+      "name" : "xai-primary",
+      "base_url" : "api.x.ai/v1",
+      "api_key" : "<xai_api_key>",
+      "concurrency" : 4,
+      "supports" : {
+         "chat" : [ "grok-3", "grok-3-mini", "grok-4-0709", "grok-4-fast-non-reasoning", "grok-4-fast-reasoning", "grok-code-fast-1" ]
+      },
+      "cost": {
+        "currency": "usd",
+        "unit": "1k_tokens",
+        "models": {
+          "grok-3": {"prompt": 0.015, "completion": 0.015},
+          "grok-3-mini" : { "prompt" : 0.0005, "completion" : 0.0005 },
+          "grok-4-0709" : { "prompt" : 0.015, "completion" : 0.015 },
+          "grok-4-fast-non-reasoning" : { "prompt" : 0.0005, "completion" : 0.0005 },
+          "grok-4-fast-reasoning" : { "prompt" : 0.0005, "completion" : 0.0005 },
+          "grok-code-fast-1" : { "prompt" : 0.0015, "completion" : 0.0015 }
+        }
+      }
     },
     {
       "type": "ollama",
