@@ -51,6 +51,10 @@ class ModelRouter:
             if backend.auto_models and backend.name not in self._auto_models:
                 self._auto_models[backend.name] = AutoModelEntry()
 
+    def aliases(self) -> Dict[str, str]:
+        """Return a copy of known model aliases."""
+        return dict(self._aliases)
+
     def update_auto_models(
         self,
         backend_name: str,

@@ -281,12 +281,59 @@ def _attach_trace_payload(
 
 
 @router.get("/models")
-async def models(runtime: GatewayRuntime = Depends(get_runtime)):
-    """
-        This currentlsy is somewhat hacked, TODO as soon as possible
-    """
-    payload = runtime.router().build_models_payload()
-    return JSONResponse(payload)
+async def models(
+    authorization: str | None = Header(default=None),
+    runtime: GatewayRuntime = Depends(get_runtime),
+):
+    """Return models available to the authenticated application."""
+    api_key = _require_api_key(authorization)
+    try:
+        auth = await runtime.authenticate(api_key)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    router = runtime.router()
+    payload = router.build_models_payload()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    entries = data if isinstance(data, list) else []
+
+    entries_by_id: Dict[str, Dict[str, Any]] = {}
+    models = []
+    seen_ids: set[str] = set()
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        if not model_id:
+            continue
+        entries_by_id[model_id] = entry
+        decision = await runtime.check_policy(auth.app, model_id)
+        if decision.allowed:
+            models.append(entry)
+            seen_ids.add(model_id)
+
+    for alias, _ in router.aliases().items():
+        if alias in seen_ids:
+            continue
+        decision = await runtime.check_policy(auth.app, alias)
+        if not decision.allowed:
+            continue
+        canonical = router.expand_alias(alias)
+        template = entries_by_id.get(canonical)
+        if template:
+            alias_entry = dict(template)
+        else:
+            alias_entry = {"object": "model"}
+        alias_entry["id"] = alias
+        if template and "owned_by" in template:
+            alias_entry.setdefault("owned_by", template["owned_by"])
+        models.append(alias_entry)
+        seen_ids.add(alias)
+
+    result = dict(payload) if isinstance(payload, dict) else {"data": []}
+    result["data"] = models
+    return JSONResponse(result)
 
 
 def _normalize_chat_response(body: Dict[str, Any], request_id: str, model: str, backend: str) -> Dict[str, Any]:
