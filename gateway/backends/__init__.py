@@ -7,6 +7,7 @@ from ..config import BackendDefinition
 from .anthropic import AnthropicBackend
 from .base import BackendClient
 from .ollama import OllamaBackend
+from .mistral import MistralBackend
 from .openai import OpenAIBackend
 
 
@@ -14,6 +15,7 @@ _BACKEND_TYPES: Dict[str, Type[BackendClient]] = {
     "ollama": OllamaBackend,
     "openai": OpenAIBackend,
     "anthropic": AnthropicBackend,
+    "mistral": MistralBackend,
 }
 
 _ALIASED_BACKENDS: Dict[str, tuple[Type[BackendClient], str]] = {

@@ -19,6 +19,7 @@ Backends included out of the box:
 * OpenAI
 * Ollama
 * Anthropic
+* Mistral
 * xAI
 
 In development:
@@ -103,6 +104,15 @@ Example `backends.json` (mixed OpenAI + Ollama):
       "concurrency" : 4,
       "supports" : { "chat": [ "claude-opus-4.1", "claude-haiku-4-5", "claude-sonnet-4-5" ] },
       "cost" : { "currency": "usd", "unit": "1k_tokens", "models": { "claude-opus-4-1" : { "prompt" : 0.075, "completion" : 0.075 }, "claude-sonnet-4-5" : { "prompt" : 0.0003, "completion" : 0.0003 }, "claude-haiku-4-5" : { "prompt" : 0.001, "completion" : 0.001 } } }
+    },
+    {
+      "type" : "mistral",
+      "name" : "mistral-primary",
+      "base_url" : "https://api.mistral.ai/v1",
+      "api_key" : "<mistral_key>",
+      "concurrency" : 1,
+      "supports" : { "chat" : [ "mistral-medium-latest" ], "embeddings" : [ "mistral-embed" ] },
+      "cost" : { "currency" : "usd", "unit" : "1k_tokens", "models" : { "mistral-medium-latest" : { "prompt" : 0.002, "completion" : 0.002 }, "mistral-embed" : { "prompt" : 0.0001, "completion" : 0.0001 } } }
     },
     {
       "type" : "xai",
