@@ -6,6 +6,7 @@ from typing import Dict, Type
 from ..config import BackendDefinition
 from .anthropic import AnthropicBackend
 from .base import BackendClient
+from .google import GoogleBackend
 from .ollama import OllamaBackend
 from .mistral import MistralBackend
 from .openai import OpenAIBackend
@@ -14,6 +15,7 @@ from .openai import OpenAIBackend
 _BACKEND_TYPES: Dict[str, Type[BackendClient]] = {
     "ollama": OllamaBackend,
     "openai": OpenAIBackend,
+    "google": GoogleBackend,
     "anthropic": AnthropicBackend,
     "mistral": MistralBackend,
 }
