@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -220,6 +220,16 @@ class AnthropicBackend(BackendClient):
         elif content_blocks is not None:
             text_parts.append(str(content_blocks))
 
+        if tool_calls and not text_parts:
+            for call in tool_calls:
+                arguments_payload = (
+                    call.get("function", {}).get("arguments")
+                    if isinstance(call, dict)
+                    else None
+                )
+                if isinstance(arguments_payload, str) and arguments_payload:
+                    text_parts.append(arguments_payload)
+
         normalized["content"] = "".join(text_parts)
         if tool_calls:
             normalized["tool_calls"] = tool_calls
@@ -227,13 +237,19 @@ class AnthropicBackend(BackendClient):
             normalized.pop("tool_calls", None)
         return normalized
 
-    def _convert_messages(self, messages: Any) -> List[Dict[str, Any]]:
+    def _convert_messages(
+        self,
+        messages: Any,
+        *,
+        system_prompt: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         if not isinstance(messages, list):
             raise ValueError("Anthropic chat payload expects 'messages' as a list")
 
         converted: List[Dict[str, Any]] = []
         tool_id_map: Dict[str, str] = {}
         pending_tool_results: List[Dict[str, Any]] = []
+        active_system = system_prompt
 
         for original in messages:
             if not isinstance(original, dict):
@@ -242,6 +258,18 @@ class AnthropicBackend(BackendClient):
             if pending_tool_results and role != "tool":
                 converted.append({"role": "user", "content": list(pending_tool_results)})
                 pending_tool_results.clear()
+            if role == "system":
+                system_text = self._message_content_to_text(original.get("content"))
+                if not system_text:
+                    continue
+                if active_system is None:
+                    active_system = system_text
+                    continue
+                fallback = dict(original)
+                fallback["role"] = "user"
+                fallback.setdefault("content", system_text)
+                converted.append(self._convert_default_message(fallback))
+                continue
             if role == "assistant":
                 converted.append(self._convert_assistant_message(original, tool_id_map))
             elif role == "tool":
@@ -254,7 +282,7 @@ class AnthropicBackend(BackendClient):
         if pending_tool_results:
             converted.append({"role": "user", "content": list(pending_tool_results)})
 
-        return converted
+        return converted, active_system
 
     def _convert_assistant_message(self, message: Dict[str, Any], tool_id_map: Dict[str, str]) -> Dict[str, Any]:
         new_message: Dict[str, Any] = {"role": "assistant"}
@@ -363,6 +391,29 @@ class AnthropicBackend(BackendClient):
     def _convert_tool_result_content(self, content: Any) -> List[Dict[str, Any]]:
         return self._as_blocks(content, allow_empty=True)
 
+    def _message_content_to_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            fragments: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    if item_type in {"text", "input_text"}:
+                        text = item.get("text") or item.get("value")
+                        if isinstance(text, str):
+                            fragments.append(text)
+                    elif item_type == "tool_result":
+                        nested = self._message_content_to_text(item.get("content"))
+                        if nested:
+                            fragments.append(nested)
+                elif isinstance(item, str):
+                    fragments.append(item)
+            return "\n".join(part for part in fragments if part)
+        if content is None:
+            return ""
+        return str(content)
+
     def _as_blocks(self, content: Any, allow_empty: bool = False) -> List[Dict[str, Any]]:
         blocks: List[Dict[str, Any]] = []
         if isinstance(content, list):
@@ -442,13 +493,170 @@ class AnthropicBackend(BackendClient):
                     return {"type": "tool", "name": name}
         return None
 
+    # Structured output is achieved by injecting a synthetic tool that mirrors
+    # the requested schema and forcing the assistant to call it. We rely on the
+    # upstream client to provide a sensible JSON schema and only normalize it
+    # enough for Anthropic's expectations.
+    def _apply_response_format(
+        self,
+        response_format: Any,
+        *,
+        tools: Optional[List[Dict[str, Any]]],
+        tool_choice: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
+        structured = self._prepare_structured_output_tool(response_format, tools)
+        if structured is None:
+            return tools, tool_choice
+
+        new_tool, selected_name = structured
+        updated_tools: List[Dict[str, Any]]
+        if tools:
+            existing_names = {t.get("name") for t in tools if isinstance(t, dict)}
+            if selected_name not in existing_names:
+                updated_tools = list(tools)
+                updated_tools.append(new_tool)
+            else:
+                updated_tools = list(tools)
+        else:
+            updated_tools = [new_tool]
+
+        if tool_choice is None or (
+            isinstance(tool_choice, dict)
+            and tool_choice.get("type") in {"auto", "any"}
+        ):
+            tool_choice = {"type": "tool", "name": selected_name}
+
+        return updated_tools, tool_choice
+
+    def _prepare_structured_output_tool(
+        self,
+        response_format: Any,
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Tuple[Dict[str, Any], str]]:
+        normalized = self._normalize_response_format_spec(response_format)
+        if normalized is None:
+            return None
+
+        base_name, schema = normalized
+        name = self._dedupe_tool_name(base_name, tools)
+        sanitized_schema = self._resolve_json_schema(schema) if schema else {"type": "object"}
+        if not sanitized_schema:
+            sanitized_schema = {"type": "object"}
+
+        tool = {
+            "name": name,
+            "description": "Gateway-injected tool to enforce structured output.",
+            "input_schema": sanitized_schema,
+        }
+        return tool, name
+
+    def _normalize_response_format_spec(self, response_format: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+        if response_format is None:
+            return None
+
+        if isinstance(response_format, str):
+            if response_format in {"json", "json_object"}:
+                return "structured_response", {"type": "object"}
+            return None
+
+        if not isinstance(response_format, dict):
+            return None
+
+        fmt_type = response_format.get("type")
+
+        if fmt_type == "json_object" or (
+            fmt_type is None and response_format.get("format") == "json_object"
+        ):
+            name = response_format.get("name") or "structured_response"
+            return name, {"type": "object"}
+
+        if fmt_type == "json_schema":
+            schema_container = response_format.get("json_schema") or {}
+            schema = schema_container.get("schema") or response_format.get("schema")
+            if schema is None:
+                schema = {"type": "object"}
+            name = schema_container.get("name") or response_format.get("name") or "structured_response"
+            return name, schema
+
+        if fmt_type is None and any(key in response_format for key in {"type", "properties"}):
+            name = response_format.get("name") or "structured_response"
+            return name, response_format
+
+        return None
+
+    def _dedupe_tool_name(self, base_name: str, tools: Optional[List[Dict[str, Any]]]) -> str:
+        if tools is None:
+            return base_name
+        existing = {
+            tool.get("name")
+            for tool in tools
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+        if base_name not in existing:
+            return base_name
+
+        index = 2
+        while True:
+            candidate = f"{base_name}_{index}"
+            if candidate not in existing:
+                return candidate
+            index += 1
+
+    def _resolve_json_schema(self, schema: Any) -> Any:
+        if not isinstance(schema, dict):
+            return schema
+
+        defs = schema.get("$defs") or schema.get("definitions") or {}
+        inlined = self._inline_refs(schema, defs)
+        inlined.pop("$defs", None)
+        inlined.pop("definitions", None)
+        return self._sanitize_schema(inlined)
+
+    def _inline_refs(self, node: Any, defs: Dict[str, Any]) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                if ref.startswith("#/$defs/") or ref.startswith("#/definitions/"):
+                    key = ref.split("/")[-1]
+                    target = defs.get(key)
+                    if target is None:
+                        return {}
+                    return self._inline_refs(target, defs)
+                return {}
+            return {k: self._inline_refs(v, defs) for k, v in node.items() if k != "$ref"}
+        if isinstance(node, list):
+            return [self._inline_refs(item, defs) for item in node]
+        return node
+
+    def _sanitize_schema(self, node: Any) -> Any:
+        if isinstance(node, dict):
+            sanitized: Dict[str, Any] = {}
+            for key, value in node.items():
+                if key in {"$schema", "$id", "$defs", "definitions"}:
+                    continue
+                if key == "additionalProperties":
+                    if isinstance(value, bool):
+                        sanitized[key] = value
+                    else:
+                        sanitized[key] = self._sanitize_schema(value)
+                    continue
+                sanitized[key] = self._sanitize_schema(value)
+            return sanitized
+        if isinstance(node, list):
+            return [self._sanitize_schema(item) for item in node]
+        return node
+
     async def chat(self, model: str, payload: Dict[str, Any], stream: bool = False):
         messages = payload.get("messages")
         if messages is None:
             raise ValueError("Anthropic chat payload requires 'messages'")
 
         stream_requested = stream or bool(payload.get("stream", False))
-        converted_messages = self._convert_messages(messages)
+        existing_system = payload.get("system")
+        converted_messages, system_prompt = self._convert_messages(
+            messages,
+            system_prompt=existing_system if isinstance(existing_system, str) and existing_system else None,
+        )
         request_body: Dict[str, Any] = {
             "model": model,
             "messages": converted_messages,
@@ -458,11 +666,23 @@ class AnthropicBackend(BackendClient):
         if "temperature" in payload and payload["temperature"] is not None:
             request_body["temperature"] = payload["temperature"]
 
+        if system_prompt:
+            request_body["system"] = system_prompt
+
         tools = self._convert_tools(payload.get("tools"))
+        tool_choice = self._convert_tool_choice(payload.get("tool_choice"))
+
+        response_format = payload.get("response_format")
+        if response_format is not None:
+            tools, tool_choice = self._apply_response_format(
+                response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+
         if tools:
             request_body["tools"] = tools
 
-        tool_choice = self._convert_tool_choice(payload.get("tool_choice"))
         if tool_choice:
             request_body["tool_choice"] = tool_choice
 
