@@ -21,6 +21,7 @@ Backends included out of the box:
 * Anthropic
 * Mistral
 * xAI
+* Google
 
 In development:
 
@@ -133,6 +134,28 @@ Example `backends.json` (mixed OpenAI + Ollama):
           "grok-4-fast-non-reasoning" : { "prompt" : 0.0005, "completion" : 0.0005 },
           "grok-4-fast-reasoning" : { "prompt" : 0.0005, "completion" : 0.0005 },
           "grok-code-fast-1" : { "prompt" : 0.0015, "completion" : 0.0015 }
+        }
+      }
+    },
+    {
+      "type" : "google",
+      "name" : "google-primary",
+      "base_url" : "https://generativelanguage.googleapis.com",
+      "api_key" : "<google_api_key>",
+      "supports" : {
+        "chat" : [
+          "gemini-2.5-pro",
+          "gemini-2.5-flash",
+          "gemini-2.5-flash-lite"
+        ]
+      },
+      "cost" : {
+        "currency" : "usd",
+        "unit" : "1k_tokens",
+        "models" : {
+          "gemini-2.5-pro" : { "prompt" : 0.0, "completion" : 0.0 },
+          "gemini-2.5-flash" : { "prompt" : 0.0, "completion" : 0.0 },
+          "gemini-2.5-flash-lite" : { "prompt" : 0.0, "completion" : 0.0 }
         }
       }
     },
