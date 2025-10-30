@@ -140,7 +140,7 @@ Example `backends.json` (mixed OpenAI + Ollama):
     {
       "type" : "google",
       "name" : "google-primary",
-      "base_url" : "https://generativelanguage.googleapis.com",
+      "base_url" : "https://generativelanguage.googleapis.com/v1beta/openai/",
       "api_key" : "<google_api_key>",
       "supports" : {
         "chat" : [
