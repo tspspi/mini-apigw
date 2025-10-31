@@ -30,7 +30,10 @@ class OllamaBackend(BackendClient):
 
     def __init__(self, definition):
         super().__init__(definition)
-        self._client = Client(host=definition.base_url)
+        client_kwargs = {"host": definition.base_url}
+        if definition.request_timeout_s is not None:
+            client_kwargs["timeout"] = definition.request_timeout_s
+        self._client = Client(**client_kwargs)
 
     async def chat(self, model: str, payload: Dict[str, Any], stream: bool = False):
         request_payload = self._prepare_chat_payload(model, payload, stream)
