@@ -37,6 +37,8 @@ from ```apps.json``` configuration file.
 
 For more details about the rational and application there is a [blog post](https://www.tspi.at/2025/10/25/miniapigw.html)
 
+![](https://raw.githubusercontent.com/tspspi/mini-apigw/refs/heads/master/docs/architectureschemaext01.png)
+
 ## Installation
 
 From PyPI (recommended):
@@ -376,7 +378,8 @@ For Apache HTTPD the following configuration proxies all API traffic through the
 
         DocumentRoot /usr/www/host.example.com/www/
 
-        ProxyPass        /       "unix:/var/run/miniapigw.sock|http://localhost/"
+        ProxyTimeout     600
+        ProxyPass        /       "unix:/var/run/miniapigw.sock|http://localhost/" connectiontimeout=10 timeout=600
         ProxyPassReverse /       "unix:/var/run/miniapigw.sock|http://localhost/"
 </VirtualHost>
 ```
