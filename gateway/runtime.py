@@ -203,6 +203,10 @@ class GatewayRuntime:
                     "model": model_state.model,
                     "cost": model_state.total_cost,
                     "request_count": model_state.request_count,
+                    "prompt_tokens": model_state.total_prompt_tokens,
+                    "completion_tokens": model_state.total_completion_tokens,
+                    "total_tokens": model_state.total_tokens,
+                    "latency_ms": model_state.total_latency_ms,
                 }
                 for model_state in state.models.values()
             ]
@@ -210,6 +214,10 @@ class GatewayRuntime:
             result[app_id] = {
                 "total_cost": state.total_cost,
                 "request_count": state.request_count,
+                "prompt_tokens": state.total_prompt_tokens,
+                "completion_tokens": state.total_completion_tokens,
+                "total_tokens": state.total_tokens,
+                "latency_ms": state.total_latency_ms,
                 "models": models,
             }
         return result

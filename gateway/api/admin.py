@@ -56,6 +56,27 @@ def _require_local_access(request: Request, runtime: GatewayRuntime) -> None:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+
+def _aggregate_usage_per_model(accounting: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    aggregated: Dict[str, Dict[str, int]] = {}
+    for app_data in accounting.values():
+        for model_entry in app_data.get("models", []):
+            model_name = model_entry.get("model")
+            if not model_name:
+                continue
+            metrics = aggregated.setdefault(
+                model_name,
+                {"request_count": 0, "total_tokens": 0, "latency_ms": 0},
+            )
+            metrics["request_count"] += int(model_entry.get("request_count") or 0)
+            total_tokens = model_entry.get("total_tokens")
+            if total_tokens is None:
+                total_tokens = (model_entry.get("prompt_tokens") or 0) + (model_entry.get("completion_tokens") or 0)
+            metrics["total_tokens"] += int(total_tokens or 0)
+            metrics["latency_ms"] += int(model_entry.get("latency_ms") or 0)
+    return aggregated
+
+
 @router.get("/stats/live")
 async def stats_live(request: Request, runtime: GatewayRuntime = Depends(get_runtime)):
     """
@@ -92,6 +113,60 @@ async def stats_usage(
         "since": since or datetime.utcnow().isoformat() + "Z",
         "apps": accounting,
     }
+    return JSONResponse(payload)
+
+
+@router.get("/stat/usagepermodel/requests")
+async def stats_usage_per_model_requests(
+    request: Request,
+    runtime: GatewayRuntime = Depends(get_runtime),
+):
+    """
+        Aggregate request counts per model for the current day.
+    """
+    _require_local_access(request, runtime)
+    accounting = await runtime.accounting_snapshot()
+    aggregated = _aggregate_usage_per_model(accounting)
+    payload = [
+        {"metric": model_name, "value": metrics["request_count"]}
+        for model_name, metrics in sorted(aggregated.items())
+    ]
+    return JSONResponse(payload)
+
+
+@router.get("/stat/usagepermodel/tokens")
+async def stats_usage_per_model_tokens(
+    request: Request,
+    runtime: GatewayRuntime = Depends(get_runtime),
+):
+    """
+        Aggregate token usage per model for the current day.
+    """
+    _require_local_access(request, runtime)
+    accounting = await runtime.accounting_snapshot()
+    aggregated = _aggregate_usage_per_model(accounting)
+    payload = [
+        {"metric": model_name, "value": metrics["total_tokens"]}
+        for model_name, metrics in sorted(aggregated.items())
+    ]
+    return JSONResponse(payload)
+
+
+@router.get("/stat/usagepermodel/time")
+async def stats_usage_per_model_time(
+    request: Request,
+    runtime: GatewayRuntime = Depends(get_runtime),
+):
+    """
+        Aggregate total processing time per model for the current day.
+    """
+    _require_local_access(request, runtime)
+    accounting = await runtime.accounting_snapshot()
+    aggregated = _aggregate_usage_per_model(accounting)
+    payload = [
+        {"metric": model_name, "value": metrics["latency_ms"] / 1000.0}
+        for model_name, metrics in sorted(aggregated.items())
+    ]
     return JSONResponse(payload)
 
 
