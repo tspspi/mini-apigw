@@ -47,7 +47,7 @@ class AccountingRecord:
     completion_tokens: Optional[int]
     total_tokens: Optional[int]
     latency_ms: Optional[int]
-    created_at: datetime = datetime.now(timezone.utc)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 @dataclass(slots=True)
 class ModelCostState:
