@@ -93,6 +93,12 @@ class AnthropicBackend(BackendClient):
                         input_delta = delta.get("input") or {}
                         if isinstance(block["input"], dict) and isinstance(input_delta, dict):
                             block["input"].update(input_delta)
+                    elif delta_type == "input_json_delta":
+                        block["type"] = "tool_use"
+                        chunk = delta.get("partial_json")
+                        if isinstance(chunk, str):
+                            buffer = block.setdefault("_input_json_buffer", "")
+                            block["_input_json_buffer"] = buffer + chunk
                     else:
                         for key, value in delta.items():
                             if key == "type":
@@ -121,6 +127,7 @@ class AnthropicBackend(BackendClient):
             message.setdefault("role", "assistant")
             message.setdefault("content", [])
             message.setdefault("model", payload.get("model"))
+            self._finalize_stream_tool_inputs(message)
             return self._build_response(
                 message,
                 usage=usage,
@@ -220,22 +227,33 @@ class AnthropicBackend(BackendClient):
         elif content_blocks is not None:
             text_parts.append(str(content_blocks))
 
-        if tool_calls and not text_parts:
-            for call in tool_calls:
-                arguments_payload = (
-                    call.get("function", {}).get("arguments")
-                    if isinstance(call, dict)
-                    else None
-                )
-                if isinstance(arguments_payload, str) and arguments_payload:
-                    text_parts.append(arguments_payload)
-
         normalized["content"] = "".join(text_parts)
         if tool_calls:
             normalized["tool_calls"] = tool_calls
         else:
             normalized.pop("tool_calls", None)
         return normalized
+
+    def _finalize_stream_tool_inputs(self, message: Dict[str, Any]) -> None:
+        content_blocks = message.get("content")
+        if not isinstance(content_blocks, list):
+            return
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+            buffer = block.pop("_input_json_buffer", None)
+            if not buffer:
+                continue
+            try:
+                parsed = json.loads(buffer)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                block["input"] = parsed
+            else:
+                block["input"] = {}
 
     def _convert_messages(
         self,
