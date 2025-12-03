@@ -80,7 +80,7 @@ class TraceManager:
         if config.include_prompts and prompt_value is not None:
             event["prompt"] = prompt_value
 
-        if config.include_response and not payload.stream and payload.response_payload is not None:
+        if config.include_response and payload.response_payload is not None:
             event["response"] = payload.response_payload
 
         if config.include_keys and payload.api_key:
