@@ -9,3 +9,11 @@ def test_alias_resolution():
     router = ModelRouter(config)
     candidates = router.candidates("gpt-4o-mini", "chat")
     assert candidates[0].backend.name == "openai"
+
+def test_responses_operation_resolves_backend():
+    supports = BackendSupports(responses=["openai:gpt-4o"], chat=["openai:gpt-4o"])
+    backend = BackendDefinition(type="openai", name="openai", base_url="https://api", supports=supports)
+    config = BackendConfig(aliases={}, sequence_groups={}, backends=[backend])
+    router = ModelRouter(config)
+    candidates = router.candidates("openai:gpt-4o", "responses")
+    assert candidates[0].backend.name == "openai"

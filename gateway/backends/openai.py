@@ -68,6 +68,74 @@ class OpenAIBackend(BackendClient):
 
         return _generator()
 
+
+    async def responses(self, model: str, payload: Dict[str, Any], stream: bool = False):
+        request_payload = dict(payload)
+        request_payload.pop("model", None)
+        request_payload.pop("stream", None)
+
+        if stream:
+            return await self._stream_responses(model, request_payload)
+
+        def _call():
+            return self._client.responses.create(model=model, **request_payload)
+
+        response = await self._asyncify(_call)
+        body = response.model_dump()
+        usage_data = body.get("usage") or {}
+        usage = BackendUsage(
+            input_tokens=usage_data.get("input_tokens"),
+            output_tokens=usage_data.get("output_tokens"),
+            total_tokens=usage_data.get("total_tokens"),
+        )
+        return BackendResult(body=body, usage=usage)
+
+    async def _stream_responses(self, model: str, payload: Dict[str, Any]) -> AsyncIterator[bytes]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        sentinel = object()
+
+        def _enqueue(value: Any) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, value)
+
+        def _producer() -> None:
+            try:
+                with self._client.responses.with_streaming_response.create(
+                    model=model, stream=True, **payload
+                ) as response:
+                    buffer: list[str] = []
+                    for line in response.iter_lines():
+                        if line is None:
+                            continue
+                        buffer.append(line)
+                        if line == "":
+                            chunk = "\n".join(buffer) + "\n"
+                            buffer.clear()
+                            _enqueue(chunk.encode("utf-8"))
+                    if buffer:
+                        chunk = "\n".join(buffer) + "\n"
+                        _enqueue(chunk.encode("utf-8"))
+            except Exception as exc:  # pragma: no cover - depends on network runtime
+                _enqueue(exc)
+            finally:
+                _enqueue(sentinel)
+
+        loop.run_in_executor(None, _producer)
+
+        async def _generator() -> AsyncIterator[bytes]:
+            while True:
+                item = await queue.get()
+                if item is sentinel:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                if isinstance(item, (bytes, bytearray)):
+                    yield bytes(item)
+                else:
+                    yield str(item).encode("utf-8")
+
+        return _generator()
+
     async def completions(self, model: str, payload: Dict[str, Any]) -> BackendResult:
         request_payload = dict(payload)
         request_payload.pop("model", None)

@@ -157,6 +157,8 @@ class GatewayRuntime:
                 result = await client.embeddings(backend_model, payload)
             elif operation == "images":
                 result = await client.images(backend_model, payload)
+            elif operation == "responses":
+                result = await client.responses(backend_model, payload, stream=stream)
             else:
                 raise RuntimeError(f"Unsupported operation '{operation}'")
         latency_ms = int((perf_counter() - start) * 1000)

@@ -58,6 +58,11 @@ class BackendClient:
     async def images(self, model: str, payload: Dict[str, Any]) -> BackendResult:
         raise NotImplementedError
 
+    async def responses(
+        self, model: str, payload: Dict[str, Any], stream: bool = False
+    ) -> BackendResult | AsyncIterator[bytes]:
+        raise NotImplementedError
+
     async def models(self) -> Dict[str, Any]:
         raise NotImplementedError
 

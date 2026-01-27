@@ -170,6 +170,8 @@ class TraceManager:
     def _extract_prompt(operation: str, payload: Dict[str, Any]) -> Any:
         if operation == "chat":
             return payload.get("messages")
+        if operation == "responses":
+            return payload.get("input")
         if operation == "completions":
             return payload.get("prompt")
         if operation == "embeddings":

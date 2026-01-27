@@ -25,6 +25,7 @@ class AutoModelEntry:
     completions: List[str] = field(default_factory=list)
     embeddings: List[str] = field(default_factory=list)
     images: List[str] = field(default_factory=list)
+    responses: List[str] = field(default_factory=list)
 
 
 _OPERATION_ATTR = {
@@ -32,6 +33,7 @@ _OPERATION_ATTR = {
     "completions": "completions",
     "embeddings": "embeddings",
     "images": "images",
+    "responses": "responses",
 }
 
 
@@ -63,6 +65,7 @@ class ModelRouter:
         completions: Optional[Iterable[str]] = None,
         embeddings: Optional[Iterable[str]] = None,
         images: Optional[Iterable[str]] = None,
+        responses: Optional[Iterable[str]] = None,
     ) -> None:
         entry = self._auto_models.setdefault(backend_name, AutoModelEntry())
         if chat is not None:
@@ -73,6 +76,8 @@ class ModelRouter:
             entry.embeddings = list(embeddings)
         if images is not None:
             entry.images = list(images)
+        if responses is not None:
+            entry.responses = list(responses)
 
     def expand_alias(self, model: str) -> str:
         seen: set[str] = set()

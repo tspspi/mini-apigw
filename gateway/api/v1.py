@@ -5,9 +5,10 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import uuid
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Sequence
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -123,6 +124,92 @@ async def chat_completions(
     )
     return JSONResponse(body)
 
+
+
+@router.post("/responses")
+async def responses_endpoint(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    authorization: str | None = Header(default=None),
+    runtime: GatewayRuntime = Depends(get_runtime),
+):
+    api_key = _require_api_key(authorization)
+    try:
+        auth = await runtime.authenticate(api_key)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    model = payload.get("model")
+    if not model:
+        raise HTTPException(status_code=400, detail="model field is required")
+
+    decision = await runtime.check_policy(auth.app, model)
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
+
+    if await runtime.app_over_limit(auth.app):
+        raise HTTPException(status_code=403, detail="Cost limit exceeded")
+
+    stream = bool(payload.get("stream", False))
+    result, record, backend = await runtime.execute_operation(
+        operation="responses", model=model, payload=payload, stream=stream
+    )
+
+    if stream:
+        if isinstance(result, BackendResult):
+            collector = _StaticStreamCollector(result.body, result.usage)
+            source_iter = _responses_result_as_sse(result)
+        else:
+            collector = _ResponsesStreamCollector()
+            source_iter = result
+
+        async def iterator():
+            try:
+                async for chunk in source_iter:
+                    collector.feed(chunk)
+                    yield chunk
+            finally:
+                body, usage = collector.finalize()
+                _apply_stream_usage(record, usage, runtime, backend, model)
+                trace_payload = _attach_trace_payload(
+                    request,
+                    runtime,
+                    app_id=auth.app.app_id,
+                    api_key=api_key,
+                    operation="responses",
+                    model=model,
+                    backend=backend,
+                    request_payload=payload,
+                    response_payload=body,
+                    record=record,
+                    stream=True,
+                )
+                if trace_payload is not None:
+                    manager = runtime.trace_manager()
+                    if manager is not None:
+                        await manager.process(trace_payload)
+                await runtime.record_usage(record, auth.app.app_id)
+
+        return StreamingResponse(iterator(), media_type="text/event-stream")
+
+    if not isinstance(result, BackendResult):
+        raise HTTPException(status_code=500, detail="Unexpected backend response type")
+
+    body = result.body
+    await runtime.record_usage(record, auth.app.app_id)
+    _attach_trace_payload(
+        request,
+        runtime,
+        app_id=auth.app.app_id,
+        api_key=api_key,
+        operation="responses",
+        model=model,
+        backend=backend,
+        request_payload=payload,
+        response_payload=body,
+        record=record,
+    )
+    return JSONResponse(body)
 
 @router.post("/completions")
 async def completions(
@@ -510,6 +597,83 @@ class _ChatStreamCollector(_StreamCollector):
         normalized = _normalize_chat_response(body, self._request_id, self._model, self._backend)
         return normalized, self._usage
 
+
+
+class _ResponsesStreamCollector(_StreamCollector):
+    def __init__(self):
+        self._response: Dict[str, Any] | None = None
+        self._usage = BackendUsage()
+
+    def feed(self, chunk: Any) -> None:
+        if chunk is None:
+            return
+        if isinstance(chunk, (bytes, bytearray)):
+            data = bytes(chunk)
+        elif isinstance(chunk, str):
+            data = chunk.encode("utf-8", errors="ignore")
+        elif isinstance(chunk, dict):
+            data = json.dumps(chunk).encode("utf-8", errors="ignore")
+        else:
+            data = str(chunk).encode("utf-8", errors="ignore")
+        for payload in _extract_sse_payloads(data):
+            if payload is None:
+                continue
+            self._process_payload(payload)
+
+    def _process_payload(self, payload: Dict[str, Any]) -> None:
+        response_obj = payload.get("response")
+        if isinstance(response_obj, dict):
+            self._response = response_obj
+            self._capture_usage(response_obj.get("usage"))
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            self._capture_usage(usage)
+
+    def _capture_usage(self, usage: Any) -> None:
+        if not isinstance(usage, dict):
+            return
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        total_tokens = usage.get("total_tokens")
+        if input_tokens is not None:
+            self._usage.input_tokens = input_tokens
+        if output_tokens is not None:
+            self._usage.output_tokens = output_tokens
+        if total_tokens is not None:
+            self._usage.total_tokens = total_tokens
+
+    def finalize(self) -> tuple[Dict[str, Any], BackendUsage]:
+        return self._response or {}, self._usage
+
+
+
+def _responses_result_as_sse(result: BackendResult) -> AsyncIterator[bytes]:
+    async def _generator() -> AsyncIterator[bytes]:
+        response_body: Dict[str, Any]
+        if isinstance(result.body, dict):
+            response_body = copy.deepcopy(result.body)
+        else:
+            response_body = {"output": result.body}
+        usage_payload: Dict[str, Any] = {}
+        body_usage = response_body.get("usage")
+        if isinstance(body_usage, dict):
+            usage_payload.update(body_usage)
+        if result.usage.input_tokens is not None:
+            usage_payload.setdefault("input_tokens", result.usage.input_tokens)
+        if result.usage.output_tokens is not None:
+            usage_payload.setdefault("output_tokens", result.usage.output_tokens)
+        if result.usage.total_tokens is not None:
+            usage_payload.setdefault("total_tokens", result.usage.total_tokens)
+        if usage_payload:
+            response_body["usage"] = usage_payload
+        payload = {"type": "response.completed", "response": response_body}
+        if usage_payload:
+            payload["usage"] = usage_payload
+        data = json.dumps(payload).encode("utf-8")
+        yield b"data: " + data + b"\\n\\n"
+        yield b"data: [DONE]\\n\\n"
+
+    return _generator()
 
 def _extract_sse_payloads(chunk: bytes) -> Iterable[Optional[Dict[str, Any]]]:
     text = chunk.decode("utf-8", errors="ignore")

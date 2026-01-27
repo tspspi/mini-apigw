@@ -108,6 +108,7 @@ class BackendSupports:
     completions: List[str] = field(default_factory=list)
     embeddings: List[str] = field(default_factory=list)
     images: List[str] = field(default_factory=list)
+    responses: List[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -264,6 +265,7 @@ def _load_backend_supports(raw: Mapping[str, Any]) -> BackendSupports:
         completions=_load_list(raw.get("completions"), "supports.completions"),
         embeddings=_load_list(raw.get("embeddings"), "supports.embeddings"),
         images=_load_list(raw.get("images"), "supports.images"),
+        responses=_load_list(raw.get("responses"), "supports.responses"),
     )
 
 
