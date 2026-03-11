@@ -1,4 +1,4 @@
-from gateway.config import BackendConfig, BackendDefinition, BackendSupports
+from gateway.config import BackendConfig, BackendDefinition, BackendSupports, ResponsesShimBackendConfig
 from gateway.routing import ModelRouter
 
 
@@ -17,3 +17,21 @@ def test_responses_operation_resolves_backend():
     router = ModelRouter(config)
     candidates = router.candidates("openai:gpt-4o", "responses")
     assert candidates[0].backend.name == "openai"
+
+
+def test_responses_operation_falls_back_to_shim():
+    supports = BackendSupports(chat=["ollama:gpt-oss"], responses=[])
+    shim_cfg = ResponsesShimBackendConfig(enabled=True, operation="chat")
+    backend = BackendDefinition(
+        type="ollama",
+        name="ollama",
+        base_url="http://localhost",
+        supports=supports,
+        responses_shim=shim_cfg,
+    )
+    config = BackendConfig(aliases={"gpt-oss": "ollama:gpt-oss"}, sequence_groups={}, backends=[backend])
+    router = ModelRouter(config)
+    candidates = router.candidates("gpt-oss", "responses")
+    assert candidates[0].backend.name == "ollama"
+    assert candidates[0].shim_operation == "chat"
+

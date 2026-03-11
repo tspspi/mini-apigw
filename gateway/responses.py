@@ -1,9 +1,10 @@
 """Responses shim scaffolding."""
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, AsyncIterator
 
 from .backends.base import BackendClient, BackendResult
 from .config import BackendDefinition, ResponsesShimBackendConfig
@@ -77,15 +78,24 @@ class ResponsesShim:
         operation = ctx.shim_config.operation or "chat"
         normalized_payload = dict(payload)
         normalized_payload.pop("model", None)
+        model_name = payload.get("model")
         if operation == "chat":
             chat_payload = self._translate_chat_payload(normalized_payload)
+            if stream:
+                stream_result = await client.chat(ctx.backend_model, chat_payload, stream=True)
+                if hasattr(stream_result, '__aiter__'):
+                    return self._chat_stream_to_responses(model_name, stream_result)
+                if isinstance(stream_result, BackendResult):
+                    body = self._normalize_chat_response(model_name, stream_result.body)
+                    return self._single_response_stream(body, stream_result.usage)
+                raise RuntimeError("Responses shim expected streaming iterator or BackendResult")
             result = await client.chat(ctx.backend_model, chat_payload, stream=False)
-            body = self._normalize_chat_response(payload.get("model"), result.body)
+            body = self._normalize_chat_response(model_name, result.body)
             return BackendResult(body=body, usage=result.usage)
         if operation == "completions":
             completion_payload = self._translate_completion_payload(normalized_payload)
             result = await client.completions(ctx.backend_model, completion_payload)
-            body = self._normalize_completion_response(payload.get("model"), result.body)
+            body = self._normalize_completion_response(model_name, result.body)
             return BackendResult(body=body, usage=result.usage)
         raise RuntimeError(f"Responses shim unsupported operation '{operation}'")
 
@@ -144,7 +154,7 @@ class ResponsesShim:
             return value
         if isinstance(value, dict):
             item_type = value.get("type")
-            if item_type in {"text", "input_text"}:
+            if item_type in {"text", "input_text", "output_text"}:
                 text_value = value.get("text") or value.get("value")
                 if isinstance(text_value, str):
                     return text_value
@@ -217,6 +227,169 @@ class ResponsesShim:
             "output": output,
             "usage": usage,
         }
+
+
+    def _chat_stream_to_responses(self, model: Optional[str], source: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        response_id = f"resp-{uuid.uuid4().hex}"
+        usage: Dict[str, Any] = {}
+
+        async def _generator() -> AsyncIterator[bytes]:
+            snapshot = {
+                "id": response_id,
+                "model": model,
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]}
+                ],
+            }
+            yield self._encode_sse({"type": "response.created", "response": snapshot})
+            text_parts: list[str] = []
+            async for chunk in source:
+                for payload in self._extract_sse_payloads(chunk):
+                    delta_text = self._extract_chat_delta(payload)
+                    if delta_text:
+                        text_parts.append(delta_text)
+                        yield self._encode_sse(
+                            {
+                                "type": "response.output_text.delta",
+                                "delta": delta_text,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "response": {"id": response_id, "model": model},
+                            }
+                        )
+                    self._capture_stream_usage(usage, payload.get("usage"))
+            final_body = self._build_stream_response_body(model, response_id, "".join(text_parts), usage)
+            payload = {"type": "response.completed", "response": final_body}
+            if final_body.get("usage"):
+                payload["usage"] = final_body["usage"]
+            yield self._encode_sse(payload)
+            yield b"data: [DONE]\n\n"
+
+        return _generator()
+
+    def _build_stream_response_body(
+        self, model: Optional[str], response_id: str, text: str, usage: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        base = {"id": response_id, "choices": [{"message": {"role": "assistant", "content": text}}]}
+        if usage:
+            base["usage"] = usage
+        return self._normalize_chat_response(model, base)
+
+    @staticmethod
+    def _encode_sse(payload: Dict[str, Any]) -> bytes:
+        data = json.dumps(payload).encode("utf-8")
+        return b"data: " + data + b"\n\n"
+
+    @staticmethod
+    def _extract_sse_payloads(chunk: bytes) -> Iterable[Optional[Dict[str, Any]]]:
+        text = chunk.decode("utf-8", errors="ignore")
+        for block in text.split("\n\n"):
+            if not block.strip():
+                continue
+            data_lines: list[str] = []
+            for line in block.splitlines():
+                line = line.strip()
+                if not line or line.startswith(":"):
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+            if not data_lines:
+                continue
+            data_str = "\n".join(data_lines).strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                yield json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+
+    def _single_response_stream(self, body: Dict[str, Any], usage: Any) -> AsyncIterator[bytes]:
+        response_id = body.get("id") or f"resp-{uuid.uuid4().hex}"
+        model = body.get("model")
+        usage_payload: Dict[str, Any] = dict(body.get("usage") or {})
+        if isinstance(usage, dict):
+            for key in ("input_tokens", "output_tokens", "total_tokens"):
+                value = usage.get(key)
+                if value is not None:
+                    usage_payload.setdefault(key, value)
+        payload_body = dict(body)
+        payload_body["id"] = response_id
+        if usage_payload:
+            payload_body["usage"] = usage_payload
+
+        async def _generator() -> AsyncIterator[bytes]:
+            output_list = payload_body.get("output")
+            if not isinstance(output_list, list) or not output_list:
+                output_list = [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]}
+                ]
+                payload_body["output"] = output_list
+            else:
+                first_content = output_list[0].get("content") if isinstance(output_list[0], dict) else None
+                if not isinstance(first_content, list) or not first_content:
+                    output_list[0]["content"] = [{"type": "output_text", "text": ""}]
+            snapshot = {"id": response_id, "model": model, "output": output_list}
+            yield self._encode_sse({"type": "response.created", "response": snapshot})
+            text = self._extract_body_output_text(payload_body)
+            if text:
+                yield self._encode_sse(
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": text,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "response": {"id": response_id, "model": model},
+                    }
+                )
+            payload = {"type": "response.completed", "response": payload_body}
+            if usage_payload:
+                payload["usage"] = usage_payload
+            yield self._encode_sse(payload)
+            yield b"data: [DONE]\n\n"
+
+        return _generator()
+
+    def _extract_body_output_text(self, body: Dict[str, Any]) -> str:
+        output = body.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if item.get("type") != "message":
+                    continue
+                content = item.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if part.get("type") == "output_text":
+                            text = part.get("text")
+                            if isinstance(text, str):
+                                return text
+        return ""
+
+    def _extract_chat_delta(self, payload: Dict[str, Any]) -> str:
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            return ""
+        fragments: list[str] = []
+        for choice in choices:
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    fragments.append(self._coerce_text_fragment(item))
+            elif isinstance(content, dict):
+                fragments.append(self._coerce_text_fragment(content))
+            elif isinstance(content, str):
+                fragments.append(content)
+        return "".join(fragments)
+
+    @staticmethod
+    def _capture_stream_usage(storage: Dict[str, Any], usage: Any) -> None:
+        if not isinstance(usage, dict):
+            return
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)):
+                storage[key] = value
 
 
 __all__ = [
