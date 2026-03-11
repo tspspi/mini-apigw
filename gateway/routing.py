@@ -17,6 +17,7 @@ class CandidateBackend:
     backend: BackendDefinition
     resolved_model: str
     backend_model: str
+    shim_operation: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -96,13 +97,19 @@ class ModelRouter:
         attr = _OPERATION_ATTR[operation]
         matches: List[CandidateBackend] = []
         for backend in self._backends.values():
-            if self._supports(backend, model_name, operation, attr):
+            shim_operation: Optional[str] = None
+            supports = self._supports(backend, model_name, operation, attr)
+            if not supports and operation == "responses":
+                shim_operation = self._shim_operation(backend, model_name)
+                supports = shim_operation is not None
+            if supports:
                 backend_model = self._normalize_model_for_backend(backend, model_name)
                 matches.append(
                     CandidateBackend(
                         backend=backend,
                         resolved_model=model_name,
                         backend_model=backend_model,
+                        shim_operation=shim_operation,
                     )
                 )
         if not matches:
@@ -119,6 +126,18 @@ class ModelRouter:
                 for model in entry.chat:
                     payload.append({"id": model, "object": "model", "owned_by": backend.name})
         return {"data": payload}
+
+    def _shim_operation(self, backend: BackendDefinition, model: str) -> Optional[str]:
+        shim_cfg = getattr(backend, 'responses_shim', None)
+        if not shim_cfg or not shim_cfg.enabled:
+            return None
+        fallback_op = shim_cfg.operation or 'chat'
+        attr = _OPERATION_ATTR.get(fallback_op)
+        if attr is None:
+            return None
+        if self._supports(backend, model, fallback_op, attr):
+            return fallback_op
+        return None
 
     def _supports(self, backend: BackendDefinition, model: str, operation: str, attr: str) -> bool:
         patterns = getattr(backend.supports, attr)

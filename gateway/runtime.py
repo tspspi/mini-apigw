@@ -16,6 +16,7 @@ from .policies import PolicyDecision, PolicyEngine
 from .routing import ModelRouter, RoutingError
 from .scheduling import Scheduler
 from .trace import TraceManager
+from .responses import ResponsesShim, ResponsesJobRegistry, ResponsesStateStore, ResponsesToolRegistry, ShimContext
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class GatewayRuntime:
             config_dir / "daemon.json",
             config_dir / "backends.json",
             config_dir / "apps.json",
+            config_dir / "tools",
         )
         self._bundle: Optional[ConfigBundle] = None
         self._backends: Dict[str, BackendClient] = {}
@@ -36,6 +38,7 @@ class GatewayRuntime:
         self._policy_engine = PolicyEngine()
         self._accounting: Optional[AccountingRecorder] = None
         self._trace_manager: Optional[TraceManager] = None
+        self._responses_shim: Optional[ResponsesShim] = None
         self._lock = asyncio.Lock()
 
     @property
@@ -69,6 +72,9 @@ class GatewayRuntime:
         self._scheduler = Scheduler(bundle.backends, backends)
         self._auth_manager = AuthManager(bundle.apps)
         self._trace_manager = TraceManager(bundle.apps)
+        self._responses_shim = ResponsesShim(
+            ResponsesStateStore(), ResponsesToolRegistry(), ResponsesJobRegistry()
+        )
         self._bundle = bundle
         self._accounting = AccountingRecorder(bundle.daemon.database)
         await self._accounting.start()
@@ -79,6 +85,7 @@ class GatewayRuntime:
             await self._accounting.stop()
             self._accounting = None
         self._trace_manager = None
+        self._responses_shim = None
         self._backends = {}
         self._router = None
         self._scheduler = None
@@ -140,16 +147,21 @@ class GatewayRuntime:
         router = self.router()
         scheduler = self.scheduler()
         candidates = router.candidates(model, operation)
-        # Naive selection: choose the first candidate backend.
         selected = candidates[0]
         backend_def = selected.backend
         client = self.backend_client(backend_def.name)
         resolved_model = selected.resolved_model
         backend_model = selected.backend_model
+        shim_operation = selected.shim_operation
 
         start = perf_counter()
         async with await scheduler.acquire(backend_def.name):
-            if operation == "chat":
+            if operation == "responses" and shim_operation:
+                if self._responses_shim is None:
+                    raise RuntimeError("Responses shim not initialized")
+                ctx = ShimContext(backend=backend_def, backend_model=backend_model, shim_config=backend_def.responses_shim)
+                result = await self._responses_shim.handle(ctx, client, payload, stream=stream)
+            elif operation == "chat":
                 result = await client.chat(backend_model, payload, stream=stream)
             elif operation == "completions":
                 result = await client.completions(backend_model, payload)

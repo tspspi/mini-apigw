@@ -92,6 +92,15 @@ class DatabaseConfig:
     ssl_ca: Optional[str] = None
 
 
+
+
+@dataclass(slots=True)
+class JobRegistryConfig:
+    default_max_age_seconds: int = 86400
+    default_max_jobs_per_app: int = 1000
+    default_max_payload_bytes: int = 1_048_576
+
+
 @dataclass(slots=True)
 class DaemonConfig:
     listen: ListenConfig
@@ -100,6 +109,7 @@ class DaemonConfig:
     reload: ReloadConfig
     timeouts: TimeoutConfig
     database: Optional[DatabaseConfig]
+    job_registry: JobRegistryConfig = field(default_factory=JobRegistryConfig)
 
 
 @dataclass(slots=True)
@@ -109,6 +119,30 @@ class BackendSupports:
     embeddings: List[str] = field(default_factory=list)
     images: List[str] = field(default_factory=list)
     responses: List[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ResponsesShimBackendConfig:
+    enabled: bool = False
+    operation: str = "chat"
+    unsupported_tools_policy: str = "silent_strip"
+    accepted_modalities: List[str] = field(default_factory=list)
+    max_attachment_bytes: Optional[int] = None
+
+
+@dataclass(slots=True)
+class ToolDefinition:
+    name: str
+    type: str
+    config: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ToolsConfig:
+    tools: List[ToolDefinition] = field(default_factory=list)
+
+    def as_dict(self) -> Dict[str, ToolDefinition]:
+        return {tool.name: tool for tool in self.tools}
 
 
 @dataclass(slots=True)
@@ -169,6 +203,7 @@ class BackendDefinition:
     request_timeout_s: Optional[float] = None
     extra_headers: Mapping[str, str] = field(default_factory=dict)
     auto_models: bool = False
+    responses_shim: ResponsesShimBackendConfig = field(default_factory=ResponsesShimBackendConfig)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -235,6 +270,8 @@ class ConfigBundle:
     daemon: DaemonConfig
     backends: BackendConfig
     apps: AppsConfig
+    tools: ToolsConfig
+    job_registry: JobRegistryConfig
 
 
 def _expect(obj: MutableMapping[str, Any], key: str, ctx: str) -> Any:
@@ -314,6 +351,23 @@ def _load_backend_cost(raw: Mapping[str, Any]) -> BackendCostConfig:
     return BackendCostConfig(default=default, currency=currency, unit=unit, models=models)
 
 
+def _load_responses_shim_config(raw: Any) -> ResponsesShimBackendConfig:
+    if raw is None:
+        return ResponsesShimBackendConfig()
+    mapping = _load_mapping(raw, "responses_shim")
+    return ResponsesShimBackendConfig(
+        enabled=bool(mapping.get("enabled", False)),
+        operation=str(mapping.get("operation", "chat")),
+        unsupported_tools_policy=str(mapping.get("unsupported_tools_policy", "silent_strip")),
+        accepted_modalities=[str(item) for item in _load_list(mapping.get("accepted_modalities"), "responses_shim.accepted_modalities")],
+        max_attachment_bytes=(
+            int(mapping.get("max_attachment_bytes"))
+            if mapping.get("max_attachment_bytes") is not None
+            else None
+        ),
+    )
+
+
 def _load_backend_definition(raw: Mapping[str, Any]) -> BackendDefinition:
     supports = _load_backend_supports(_load_mapping(raw.get("supports"), "supports"))
     cost = _load_backend_cost(_load_mapping(raw.get("cost"), "cost"))
@@ -331,6 +385,7 @@ def _load_backend_definition(raw: Mapping[str, Any]) -> BackendDefinition:
         request_timeout_s=float(raw["request_timeout_s"]) if raw.get("request_timeout_s") is not None else None,
         extra_headers=extra_headers,
         auto_models=bool(raw.get("auto_models", False)),
+        responses_shim=_load_responses_shim_config(raw.get("responses_shim")),
         metadata=_load_mapping(raw.get("metadata"), "metadata"),
     )
 
@@ -413,6 +468,25 @@ def _load_app_definition(raw: Mapping[str, Any]) -> AppDefinition:
         cost_limit=cost_limit,
         trace=trace,
     )
+
+
+def load_tools_config(path: Path) -> ToolsConfig:
+    if not path.exists():
+        return ToolsConfig()
+    if not path.is_dir():
+        raise ConfigError(f"Tools config path is not a directory: {path}")
+    tools: List[ToolDefinition] = []
+    for entry in sorted(path.glob('*.json')):
+        data = _load_json(entry)
+        if not isinstance(data, Mapping):
+            raise ConfigError(f"Tool definition must be an object: {entry}")
+        name = str(_expect(dict(data), 'name', entry.name))
+        tool_type = str(_expect(dict(data), 'type', entry.name))
+        config = _load_mapping(data.get('config'), f"{entry.name}.config")
+        tools.append(ToolDefinition(name=name, type=tool_type, config=config))
+    return ToolsConfig(tools=tools)
+
+
 
 
 def load_apps_config(path: Path) -> AppsConfig:
@@ -507,6 +581,17 @@ def load_daemon_config(path: Path) -> DaemonConfig:
             ssl_ca=db_raw.get("ssl_ca"),
         )
 
+    job_registry_raw = data.get("job_registry")
+    job_registry = JobRegistryConfig()
+    if job_registry_raw is not None:
+        mapping = _load_mapping(job_registry_raw, "job_registry")
+        job_registry = JobRegistryConfig(
+            default_max_age_seconds=int(mapping.get("default_max_age_seconds", job_registry.default_max_age_seconds)),
+            default_max_jobs_per_app=int(mapping.get("default_max_jobs_per_app", job_registry.default_max_jobs_per_app)),
+            default_max_payload_bytes=int(mapping.get("default_max_payload_bytes", job_registry.default_max_payload_bytes)),
+        )
+
+
     return DaemonConfig(
         listen=listen,
         admin=admin,
@@ -514,6 +599,7 @@ def load_daemon_config(path: Path) -> DaemonConfig:
         reload=reload_cfg,
         timeouts=timeouts,
         database=database_cfg,
+        job_registry=job_registry,
     )
 
 
@@ -531,10 +617,11 @@ def _load_json(path: Path) -> Any:
 class ConfigManager:
     """Thread-safe holder for active configuration bundle."""
 
-    def __init__(self, daemon_path: Path, backends_path: Path, apps_path: Path):
+    def __init__(self, daemon_path: Path, backends_path: Path, apps_path: Path, tools_dir: Optional[Path] = None):
         self._daemon_path = daemon_path
         self._backends_path = backends_path
         self._apps_path = apps_path
+        self._tools_dir = tools_dir
         self._lock = RLock()
         self._bundle: Optional[ConfigBundle] = None
 
@@ -545,7 +632,11 @@ class ConfigManager:
             daemon = load_daemon_config(self._daemon_path)
             backends = load_backends_config(self._backends_path)
             apps = load_apps_config(self._apps_path)
-            self._bundle = ConfigBundle(daemon=daemon, backends=backends, apps=apps)
+            tools_path = self._tools_dir or (self._daemon_path.parent / 'tools')
+            tools = load_tools_config(tools_path)
+            self._bundle = ConfigBundle(
+                daemon=daemon, backends=backends, apps=apps, tools=tools, job_registry=daemon.job_registry
+            )
             return self._bundle
 
     def current(self) -> ConfigBundle:
@@ -572,8 +663,12 @@ __all__ = [
     "CostLimitConfig",
     "DaemonConfig",
     "DatabaseConfig",
+    "JobRegistryConfig",
     "ListenConfig",
     "LoggingConfig",
     "ReloadConfig",
+    "ResponsesShimBackendConfig",
     "TimeoutConfig",
+    "ToolDefinition",
+    "ToolsConfig",
 ]
