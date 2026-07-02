@@ -120,4 +120,103 @@ def test_responses_stream_emits_valid_sse_newlines():
 
     chunks = asyncio.run(collect())
     assert chunks[0].endswith(b"\n\n")
-    assert chunks[1] == b"data: [DONE]\n\n"
+    assert chunks[-1] == b"data: [DONE]\n\n"
+
+
+def test_responses_stream_prefers_backend_usage_over_zero_usage_in_body():
+    result = BackendResult(
+        body={
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 0,
+            "model": "shim-model",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 0,
+            },
+        },
+        usage=BackendUsage(input_tokens=2, output_tokens=3, total_tokens=5),
+    )
+
+    async def collect() -> list[bytes]:
+        chunks: list[bytes] = []
+        async for chunk in v1._responses_result_as_sse(result):
+            chunks.append(chunk)
+        return chunks
+
+    import asyncio
+    import json
+
+    chunks = asyncio.run(collect())
+    payload = json.loads(chunks[2][6:].decode("utf-8"))
+    assert payload["response"]["usage"]["input_tokens"] == 2
+    assert payload["response"]["usage"]["output_tokens"] == 3
+    assert payload["response"]["usage"]["total_tokens"] == 5
+
+
+def test_responses_stream_emits_created_delta_and_completed_events():
+    result = BackendResult(
+        body={
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 0,
+            "model": "shim-model",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+        usage=BackendUsage(input_tokens=2, output_tokens=3, total_tokens=5),
+    )
+
+    async def collect_payloads():
+        chunks = []
+        async for chunk in v1._responses_result_as_sse(result):
+            if chunk == b"data: [DONE]\n\n":
+                continue
+            chunks.append(chunk)
+        return chunks
+
+    import asyncio
+    import json
+
+    chunks = asyncio.run(collect_payloads())
+    created = json.loads(chunks[0][6:].decode("utf-8"))
+    delta = json.loads(chunks[1][6:].decode("utf-8"))
+    completed = json.loads(chunks[2][6:].decode("utf-8"))
+
+    assert created["type"] == "response.created"
+    assert created["response"]["output"][0]["id"] == "msg_test"
+    assert delta == {
+        "type": "response.output_text.delta",
+        "delta": "hello",
+        "output_index": 0,
+        "content_index": 0,
+        "response": {"id": "resp_test", "model": "shim-model"},
+    }
+    assert completed["type"] == "response.completed"

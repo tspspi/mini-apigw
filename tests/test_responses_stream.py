@@ -96,6 +96,7 @@ def test_responses_shim_non_stream_payload_matches_openai_response_schema():
     parsed = Response.model_validate(body)
     assert parsed.status == "completed"
     assert parsed.output[0].content[0].text == "Hello world"
+    assert parsed.usage.input_tokens == 3
 
 
 def test_responses_shim_coerces_iso_created_at_to_numeric_timestamp():
@@ -139,3 +140,31 @@ def test_single_response_stream_merges_backend_usage():
     assert events[-1]["response"]["usage"]["input_tokens"] == 2
     assert events[-1]["response"]["usage"]["output_tokens"] == 3
     assert events[-1]["response"]["usage"]["total_tokens"] == 5
+
+
+def test_responses_shim_omits_usage_when_backend_does_not_report_it():
+    shim = ResponsesShim(ResponsesStateStore(), ResponsesToolRegistry(), ResponsesJobRegistry())
+    body = shim._normalize_chat_response(
+        "shim-model",
+        {
+            "id": "chatcmpl-test",
+            "choices": [{"message": {"role": "assistant", "content": "Hello world"}}],
+        },
+    )
+    assert body["usage"] == {}
+
+
+def test_responses_shim_preserves_partial_usage_fields():
+    shim = ResponsesShim(ResponsesStateStore(), ResponsesToolRegistry(), ResponsesJobRegistry())
+    body = shim._normalize_chat_response(
+        "shim-model",
+        {
+            "id": "chatcmpl-test",
+            "choices": [{"message": {"role": "assistant", "content": "Hello world"}}],
+            "usage": {"input_tokens": 3},
+        },
+    )
+    assert body["usage"] == {
+        "input_tokens": 3,
+        "input_tokens_details": {"cached_tokens": 0},
+    }

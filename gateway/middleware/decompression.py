@@ -8,6 +8,7 @@ from typing import Callable
 
 import zstandard
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -16,8 +17,8 @@ class RequestDecompressionMiddleware(BaseHTTPMiddleware):
     _MAX_DECOMPRESSED_BODY_BYTES = 8 * 1024 * 1024
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Response]) -> Response:
-        encoding = request.headers.get("content-encoding")
-        if not encoding:
+        raw_encoding = request.headers.get("content-encoding")
+        if not raw_encoding:
             return await call_next(request)
 
         raw_body = await request.body()
@@ -25,7 +26,7 @@ class RequestDecompressionMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            body = self._decode(raw_body, encoding)
+            body = self._decode(raw_body, raw_encoding)
         except ValueError as exc:
             payload = json.dumps({"detail": str(exc)}).encode("utf-8")
             return Response(payload, status_code=400, media_type="application/json")
@@ -35,11 +36,24 @@ class RequestDecompressionMiddleware(BaseHTTPMiddleware):
 
         request._body = body
         request._receive = receive
+        headers = MutableHeaders(scope=request.scope)
+        if "content-encoding" in headers:
+            del headers["content-encoding"]
+        headers["content-length"] = str(len(body))
         return await call_next(request)
 
     @staticmethod
     def _decode(body: bytes, encoding: str) -> bytes:
-        normalized = encoding.strip().lower()
+        encodings = [token.strip().lower() for token in encoding.split(",") if token.strip()]
+        if not encodings:
+            raise ValueError("Unsupported Content-Encoding ''")
+        data = body
+        for normalized in reversed(encodings):
+            data = RequestDecompressionMiddleware._decode_single(data, normalized, encoding)
+        return data
+
+    @staticmethod
+    def _decode_single(body: bytes, normalized: str, original_encoding: str) -> bytes:
         if normalized in {"zstd", "x-zstd"}:
             try:
                 with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)) as reader:
@@ -68,7 +82,7 @@ class RequestDecompressionMiddleware(BaseHTTPMiddleware):
                 return data
             except zlib.error as exc:
                 raise ValueError("Invalid deflate-compressed request body") from exc
-        raise ValueError(f"Unsupported Content-Encoding '{encoding}'")
+        raise ValueError(f"Unsupported Content-Encoding '{original_encoding}'")
 
     @staticmethod
     def _read_limited(reader, limit: int) -> bytes:

@@ -237,18 +237,23 @@ class ResponsesShim:
     @staticmethod
     def _normalize_usage(usage: Any) -> Dict[str, Any]:
         payload = dict(usage or {}) if isinstance(usage, dict) else {}
-        input_tokens = int(payload.get("input_tokens") or 0)
-        output_tokens = int(payload.get("output_tokens") or 0)
+        input_tokens = payload.get("input_tokens")
+        output_tokens = payload.get("output_tokens")
         total_tokens = payload.get("total_tokens")
-        if total_tokens is None:
-            total_tokens = input_tokens + output_tokens
-        return {
-            "input_tokens": int(input_tokens),
-            "input_tokens_details": payload.get("input_tokens_details") or {"cached_tokens": 0},
-            "output_tokens": int(output_tokens),
-            "output_tokens_details": payload.get("output_tokens_details") or {"reasoning_tokens": 0},
-            "total_tokens": int(total_tokens),
-        }
+        if input_tokens is None and output_tokens is None and total_tokens is None:
+            return {}
+        normalized: Dict[str, Any] = {}
+        if input_tokens is not None:
+            normalized["input_tokens"] = int(input_tokens)
+            normalized["input_tokens_details"] = payload.get("input_tokens_details") or {"cached_tokens": 0}
+        if output_tokens is not None:
+            normalized["output_tokens"] = int(output_tokens)
+            normalized["output_tokens_details"] = payload.get("output_tokens_details") or {"reasoning_tokens": 0}
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = int(input_tokens) + int(output_tokens)
+        if total_tokens is not None:
+            normalized["total_tokens"] = int(total_tokens)
+        return normalized
 
     @staticmethod
     def _normalize_created_at(value: Any) -> int:

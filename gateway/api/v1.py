@@ -659,18 +659,88 @@ def _responses_result_as_sse(result: BackendResult) -> AsyncIterator[bytes]:
         if isinstance(body_usage, dict):
             usage_payload.update(body_usage)
         if result.usage.input_tokens is not None:
-            usage_payload.setdefault("input_tokens", result.usage.input_tokens)
+            if usage_payload.get("input_tokens") in (None, 0):
+                usage_payload["input_tokens"] = result.usage.input_tokens
         if result.usage.output_tokens is not None:
-            usage_payload.setdefault("output_tokens", result.usage.output_tokens)
+            if usage_payload.get("output_tokens") in (None, 0):
+                usage_payload["output_tokens"] = result.usage.output_tokens
         if result.usage.total_tokens is not None:
-            usage_payload.setdefault("total_tokens", result.usage.total_tokens)
+            if usage_payload.get("total_tokens") in (None, 0):
+                usage_payload["total_tokens"] = result.usage.total_tokens
         if usage_payload:
             response_body["usage"] = usage_payload
+        output_list = response_body.get("output")
+        if not isinstance(output_list, list) or not output_list:
+            output_list = [
+                {
+                    "id": f"msg_{uuid.uuid4().hex}",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "", "annotations": []}],
+                }
+            ]
+            response_body["output"] = output_list
+        else:
+            first_item = output_list[0] if isinstance(output_list[0], dict) else None
+            if not isinstance(first_item, dict):
+                first_item = {
+                    "id": f"msg_{uuid.uuid4().hex}",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "", "annotations": []}],
+                }
+                output_list[0] = first_item
+            else:
+                first_item.setdefault("id", f"msg_{uuid.uuid4().hex}")
+                first_item.setdefault("type", "message")
+                first_item.setdefault("role", "assistant")
+                first_item.setdefault("status", "completed")
+                content = first_item.get("content")
+                if not isinstance(content, list) or not content:
+                    first_item["content"] = [{"type": "output_text", "text": "", "annotations": []}]
+                else:
+                    first_part = content[0] if isinstance(content[0], dict) else None
+                    if not isinstance(first_part, dict):
+                        content[0] = {"type": "output_text", "text": "", "annotations": []}
+                    else:
+                        first_part.setdefault("type", "output_text")
+                        first_part.setdefault("text", "")
+                        first_part.setdefault("annotations", [])
+        snapshot = {
+            "id": response_body.get("id"),
+            "model": response_body.get("model"),
+            "output": output_list,
+        }
+        yield b"data: " + json.dumps({"type": "response.created", "response": snapshot}).encode("utf-8") + b"\n\n"
+        delta = ""
+        for item in output_list:
+            if item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if part.get("type") != "output_text":
+                    continue
+                text = part.get("text")
+                if isinstance(text, str):
+                    delta += text
+        if delta:
+            yield b"data: " + json.dumps(
+                {
+                    "type": "response.output_text.delta",
+                    "delta": delta,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "response": {"id": response_body.get("id"), "model": response_body.get("model")},
+                }
+            ).encode("utf-8") + b"\n\n"
         payload = {"type": "response.completed", "response": response_body}
         if usage_payload:
             payload["usage"] = usage_payload
-        data = json.dumps(payload).encode("utf-8")
-        yield b"data: " + data + b"\n\n"
+        yield b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
         yield b"data: [DONE]\n\n"
 
     return _generator()
