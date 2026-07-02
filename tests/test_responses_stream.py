@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import pytest
+from openai.types.responses.response import Response
 
 from gateway.config import BackendDefinition, BackendSupports, ResponsesShimBackendConfig
 from gateway.responses import (
@@ -69,3 +70,39 @@ async def test_responses_shim_stream_produces_responses_events():
     assert events[1]["delta"] == "Hello world"
     assert events[-1]["type"] == "response.completed"
     assert events[-1]["response"]["output"][0]["content"][0]["text"] == "Hello world"
+
+
+def test_responses_shim_non_stream_payload_matches_openai_response_schema():
+    backend = BackendDefinition(
+        type="shim",
+        name="shim-backend",
+        base_url="http://shim",
+        supports=BackendSupports(chat=["shim:model"]),
+        responses_shim=ResponsesShimBackendConfig(enabled=True, operation="chat"),
+    )
+    shim = ResponsesShim(ResponsesStateStore(), ResponsesToolRegistry(), ResponsesJobRegistry())
+    body = shim._normalize_chat_response(
+        "shim-model",
+        {
+            "id": "chatcmpl-test",
+            "choices": [{"message": {"role": "assistant", "content": "Hello world"}}],
+            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        },
+    )
+    parsed = Response.model_validate(body)
+    assert parsed.status == "completed"
+    assert parsed.output[0].content[0].text == "Hello world"
+
+
+def test_responses_shim_coerces_iso_created_at_to_numeric_timestamp():
+    shim = ResponsesShim(ResponsesStateStore(), ResponsesToolRegistry(), ResponsesJobRegistry())
+    body = shim._normalize_chat_response(
+        "shim-model",
+        {
+            "id": "chatcmpl-test",
+            "created_at": "2026-07-02T17:34:14.089848Z",
+            "choices": [{"message": {"role": "assistant", "content": "Hello world"}}],
+            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        },
+    )
+    assert isinstance(body["created_at"], int)

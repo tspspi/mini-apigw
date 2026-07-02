@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, AsyncIterator
 
@@ -179,25 +181,19 @@ class ResponsesShim:
         else:
             role = "assistant"
             text = body.get("text") or ""
-        output = [
-            {
-                "type": "message",
-                "role": role,
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": text,
-                    }
-                ],
-            }
-        ]
+        output = [self._build_output_message(role, text)]
         response_id = body.get("id") or f"resp-{uuid.uuid4().hex}"
-        usage = body.get("usage") or {}
+        usage = self._normalize_usage(body.get("usage"))
         return {
             "id": response_id,
+            "created_at": self._normalize_created_at(body.get("created_at")),
             "object": "response",
             "model": model,
             "output": output,
+            "parallel_tool_calls": bool(body.get("parallel_tool_calls", False)),
+            "tool_choice": body.get("tool_choice") or "auto",
+            "tools": body.get("tools") or [],
+            "status": body.get("status") or "completed",
             "usage": usage,
         }
 
@@ -206,27 +202,72 @@ class ResponsesShim:
         choices = body.get("choices") or []
         if choices:
             text = choices[0].get("text") or text
-        output = [
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": text,
-                    }
-                ],
-            }
-        ]
+        output = [self._build_output_message("assistant", text)]
         response_id = body.get("id") or f"resp-{uuid.uuid4().hex}"
-        usage = body.get("usage") or {}
+        usage = self._normalize_usage(body.get("usage"))
         return {
             "id": response_id,
+            "created_at": self._normalize_created_at(body.get("created_at")),
             "object": "response",
             "model": model,
             "output": output,
+            "parallel_tool_calls": bool(body.get("parallel_tool_calls", False)),
+            "tool_choice": body.get("tool_choice") or "auto",
+            "tools": body.get("tools") or [],
+            "status": body.get("status") or "completed",
             "usage": usage,
         }
+
+    @staticmethod
+    def _build_output_message(role: str, text: str) -> Dict[str, Any]:
+        return {
+            "id": f"msg-{uuid.uuid4().hex}",
+            "type": "message",
+            "role": role if role == "assistant" else "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": [],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _normalize_usage(usage: Any) -> Dict[str, Any]:
+        payload = dict(usage or {}) if isinstance(usage, dict) else {}
+        input_tokens = int(payload.get("input_tokens") or 0)
+        output_tokens = int(payload.get("output_tokens") or 0)
+        total_tokens = payload.get("total_tokens")
+        if total_tokens is None:
+            total_tokens = input_tokens + output_tokens
+        return {
+            "input_tokens": int(input_tokens),
+            "input_tokens_details": payload.get("input_tokens_details") or {"cached_tokens": 0},
+            "output_tokens": int(output_tokens),
+            "output_tokens_details": payload.get("output_tokens_details") or {"reasoning_tokens": 0},
+            "total_tokens": int(total_tokens),
+        }
+
+    @staticmethod
+    def _normalize_created_at(value: Any) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                try:
+                    return int(float(text))
+                except ValueError:
+                    pass
+                try:
+                    if text.endswith("Z"):
+                        text = text[:-1] + "+00:00"
+                    return int(datetime.fromisoformat(text).timestamp())
+                except ValueError:
+                    pass
+        return int(time.time())
 
 
     def _chat_stream_to_responses(self, model: Optional[str], source: AsyncIterator[bytes]) -> AsyncIterator[bytes]:

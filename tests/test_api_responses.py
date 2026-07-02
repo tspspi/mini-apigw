@@ -77,3 +77,47 @@ def test_responses_proxy_returns_backend_payload():
     assert runtime.last_operation == "responses"
     assert runtime.last_payload["model"] == "gpt-4o-mini"
     assert runtime.recorded[1] == "app-test"
+
+
+def test_responses_stream_emits_valid_sse_newlines():
+    result = BackendResult(
+        body={
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 0,
+            "model": "shim-model",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 1,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 1,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 2,
+            },
+        },
+        usage=BackendUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+    )
+
+    async def collect() -> list[bytes]:
+        chunks: list[bytes] = []
+        async for chunk in v1._responses_result_as_sse(result):
+            chunks.append(chunk)
+        return chunks
+
+    import asyncio
+
+    chunks = asyncio.run(collect())
+    assert chunks[0].endswith(b"\n\n")
+    assert chunks[1] == b"data: [DONE]\n\n"
