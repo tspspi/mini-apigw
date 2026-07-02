@@ -4,6 +4,7 @@ import json
 import pytest
 from openai.types.responses.response import Response
 
+from gateway.backends.base import BackendUsage
 from gateway.config import BackendDefinition, BackendSupports, ResponsesShimBackendConfig
 from gateway.responses import (
     ResponsesJobRegistry,
@@ -66,6 +67,9 @@ async def test_responses_shim_stream_produces_responses_events():
             continue
         events.append(json.loads(payload))
     assert events[0]["type"] == "response.created"
+    assert events[0]["response"]["output"][0]["id"].startswith("msg-")
+    assert events[0]["response"]["output"][0]["status"] == "completed"
+    assert events[0]["response"]["output"][0]["content"][0]["annotations"] == []
     assert events[1]["type"] == "response.output_text.delta"
     assert events[1]["delta"] == "Hello world"
     assert events[-1]["type"] == "response.completed"
@@ -106,3 +110,32 @@ def test_responses_shim_coerces_iso_created_at_to_numeric_timestamp():
         },
     )
     assert isinstance(body["created_at"], int)
+
+
+def test_single_response_stream_merges_backend_usage():
+    shim = ResponsesShim(ResponsesStateStore(), ResponsesToolRegistry(), ResponsesJobRegistry())
+    body = shim._normalize_chat_response(
+        "shim-model",
+        {
+            "id": "chatcmpl-test",
+            "choices": [{"message": {"role": "assistant", "content": "Hello world"}}],
+        },
+    )
+
+    async def collect():
+        stream = shim._single_response_stream(body, BackendUsage(input_tokens=2, output_tokens=3, total_tokens=5))
+        events = []
+        async for chunk in stream:
+            data = chunk.decode("utf-8").strip()
+            if not data.startswith("data: "):
+                continue
+            payload = data[6:]
+            if payload == "[DONE]":
+                continue
+            events.append(json.loads(payload))
+        return events
+
+    events = asyncio.run(collect())
+    assert events[-1]["response"]["usage"]["input_tokens"] == 2
+    assert events[-1]["response"]["usage"]["output_tokens"] == 3
+    assert events[-1]["response"]["usage"]["total_tokens"] == 5

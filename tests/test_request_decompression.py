@@ -48,3 +48,25 @@ def test_zstd_request_without_content_size_is_decompressed():
 
     assert response.status_code == 200
     assert response.json() == {"model": "test-model", "input": "hello"}
+
+
+def test_zstd_request_that_expands_too_large_is_rejected():
+    app = FastAPI()
+    app.add_middleware(RequestDecompressionMiddleware)
+
+    @app.post("/echo")
+    async def echo(payload=Body(...)):
+        return payload
+
+    body = b"a" * ((8 * 1024 * 1024) + 1)
+    compressed = zstandard.ZstdCompressor(write_content_size=False).compress(body)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/echo",
+            headers={"Content-Type": "application/json", "Content-Encoding": "zstd"},
+            content=compressed,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Decompressed request body too large"

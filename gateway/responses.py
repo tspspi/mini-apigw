@@ -8,7 +8,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, AsyncIterator
 
-from .backends.base import BackendClient, BackendResult
+from .backends.base import BackendClient, BackendResult, BackendUsage
 from .config import BackendDefinition, ResponsesShimBackendConfig
 
 
@@ -278,9 +278,7 @@ class ResponsesShim:
             snapshot = {
                 "id": response_id,
                 "model": model,
-                "output": [
-                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]}
-                ],
+                "output": [self._build_output_message("assistant", "")],
             }
             yield self._encode_sse({"type": "response.created", "response": snapshot})
             text_parts: list[str] = []
@@ -349,11 +347,19 @@ class ResponsesShim:
         response_id = body.get("id") or f"resp-{uuid.uuid4().hex}"
         model = body.get("model")
         usage_payload: Dict[str, Any] = dict(body.get("usage") or {})
-        if isinstance(usage, dict):
+        if isinstance(usage, BackendUsage):
+            for key, value in (
+                ("input_tokens", usage.input_tokens),
+                ("output_tokens", usage.output_tokens),
+                ("total_tokens", usage.total_tokens),
+            ):
+                if value is not None and usage_payload.get(key) in (None, 0):
+                    usage_payload[key] = value
+        elif isinstance(usage, dict):
             for key in ("input_tokens", "output_tokens", "total_tokens"):
                 value = usage.get(key)
-                if value is not None:
-                    usage_payload.setdefault(key, value)
+                if value is not None and usage_payload.get(key) in (None, 0):
+                    usage_payload[key] = value
         payload_body = dict(body)
         payload_body["id"] = response_id
         if usage_payload:
@@ -362,14 +368,12 @@ class ResponsesShim:
         async def _generator() -> AsyncIterator[bytes]:
             output_list = payload_body.get("output")
             if not isinstance(output_list, list) or not output_list:
-                output_list = [
-                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]}
-                ]
+                output_list = [self._build_output_message("assistant", "")]
                 payload_body["output"] = output_list
             else:
                 first_content = output_list[0].get("content") if isinstance(output_list[0], dict) else None
                 if not isinstance(first_content, list) or not first_content:
-                    output_list[0]["content"] = [{"type": "output_text", "text": ""}]
+                    output_list[0]["content"] = [{"type": "output_text", "text": "", "annotations": []}]
             snapshot = {"id": response_id, "model": model, "output": output_list}
             yield self._encode_sse({"type": "response.created", "response": snapshot})
             text = self._extract_body_output_text(payload_body)
