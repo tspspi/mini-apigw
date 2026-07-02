@@ -670,8 +670,8 @@ def _responses_result_as_sse(result: BackendResult) -> AsyncIterator[bytes]:
         if usage_payload:
             payload["usage"] = usage_payload
         data = json.dumps(payload).encode("utf-8")
-        yield b"data: " + data + b"\\n\\n"
-        yield b"data: [DONE]\\n\\n"
+        yield b"data: " + data + b"\n\n"
+        yield b"data: [DONE]\n\n"
 
     return _generator()
 
