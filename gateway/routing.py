@@ -132,12 +132,26 @@ class ModelRouter:
         if not shim_cfg or not shim_cfg.enabled:
             return None
         fallback_op = shim_cfg.operation or 'chat'
+        if fallback_op == "responses":
+            if self._supports_responses_shim_model(backend, model):
+                return "responses"
+            return None
         attr = _OPERATION_ATTR.get(fallback_op)
         if attr is None:
             return None
         if self._supports(backend, model, fallback_op, attr):
             return fallback_op
         return None
+
+    def _supports_responses_shim_model(self, backend: BackendDefinition, model: str) -> bool:
+        return any(
+            self._supports(backend, model, operation, attr)
+            for operation, attr in (
+                ("chat", "chat"),
+                ("completions", "completions"),
+                ("responses", "responses"),
+            )
+        )
 
     def _supports(self, backend: BackendDefinition, model: str, operation: str, attr: str) -> bool:
         patterns = getattr(backend.supports, attr)
