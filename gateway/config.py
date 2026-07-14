@@ -126,6 +126,8 @@ class ResponsesShimBackendConfig:
     enabled: bool = False
     operation: str = "chat"
     unsupported_tools_policy: str = "silent_strip"
+    reorder_system_messages_to_front: bool = False
+    coalesce_system_messages: bool = False
     accepted_modalities: List[str] = field(default_factory=list)
     max_attachment_bytes: Optional[int] = None
 
@@ -359,6 +361,8 @@ def _load_responses_shim_config(raw: Any) -> ResponsesShimBackendConfig:
         enabled=bool(mapping.get("enabled", False)),
         operation=str(mapping.get("operation", "chat")),
         unsupported_tools_policy=str(mapping.get("unsupported_tools_policy", "silent_strip")),
+        reorder_system_messages_to_front=bool(mapping.get("reorder_system_messages_to_front", False)),
+        coalesce_system_messages=bool(mapping.get("coalesce_system_messages", False)),
         accepted_modalities=[str(item) for item in _load_list(mapping.get("accepted_modalities"), "responses_shim.accepted_modalities")],
         max_attachment_bytes=(
             int(mapping.get("max_attachment_bytes"))

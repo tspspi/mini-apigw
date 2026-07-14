@@ -167,7 +167,12 @@ class ResponsesShim:
         normalized_payload.pop("model", None)
         model_name = payload.get("model")
         if operation == "chat":
-            chat_payload = self._translate_chat_payload(normalized_payload, backend_type=ctx.backend.type)
+            chat_payload = self._translate_chat_payload(
+                normalized_payload,
+                backend_type=ctx.backend.type,
+                reorder_system_messages_to_front=ctx.shim_config.reorder_system_messages_to_front,
+                coalesce_system_messages=ctx.shim_config.coalesce_system_messages,
+            )
             if stream:
                 stream_result = await client.chat(ctx.backend_model, chat_payload, stream=True)
                 if hasattr(stream_result, '__aiter__'):
@@ -195,7 +200,13 @@ class ResponsesShim:
             return result
         raise RuntimeError(f"Responses shim unsupported operation '{operation}'")
 
-    def _translate_chat_payload(self, payload: Dict[str, Any], backend_type: Optional[str] = None) -> Dict[str, Any]:
+    def _translate_chat_payload(
+        self,
+        payload: Dict[str, Any],
+        backend_type: Optional[str] = None,
+        reorder_system_messages_to_front: bool = False,
+        coalesce_system_messages: bool = False,
+    ) -> Dict[str, Any]:
         request: Dict[str, Any] = {
             k: v
             for k, v in payload.items()
@@ -217,7 +228,11 @@ class ResponsesShim:
         if isinstance(instructions, str) and instructions.strip():
             system_message = {"role": "system", "content": instructions.strip()}
             messages = [system_message] + messages
-        request["messages"] = [self._normalize_chat_message(message) for message in messages]
+        request["messages"] = self._normalize_chat_messages(
+            messages,
+            reorder_system_messages_to_front=reorder_system_messages_to_front,
+            coalesce_system_messages=coalesce_system_messages,
+        )
         tools = request.get("tools")
         if isinstance(tools, list):
             request["tools"] = self._translate_chat_tools(tools)
@@ -370,6 +385,41 @@ class ResponsesShim:
         normalized = dict(message)
         normalized["role"] = self._normalize_chat_role(message.get("role"))
         return normalized
+
+    def _normalize_chat_messages(
+        self,
+        messages: list[Any],
+        *,
+        reorder_system_messages_to_front: bool = False,
+        coalesce_system_messages: bool = False,
+    ) -> list[Dict[str, Any]]:
+        normalized = [self._normalize_chat_message(message) for message in messages]
+        if reorder_system_messages_to_front:
+            system_messages = [message for message in normalized if message.get("role") == "system"]
+            if system_messages:
+                non_system_messages = [message for message in normalized if message.get("role") != "system"]
+                normalized = system_messages + non_system_messages
+        if coalesce_system_messages:
+            normalized = self._coalesce_leading_system_messages(normalized)
+        return normalized
+
+    @staticmethod
+    def _coalesce_leading_system_messages(messages: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        if len(messages) < 2:
+            return messages
+        merged_contents: list[str] = []
+        split_index = 0
+        for message in messages:
+            if message.get("role") != "system":
+                break
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                merged_contents.append(content.strip())
+            split_index += 1
+        if split_index < 2:
+            return messages
+        merged_message = {"role": "system", "content": "\n\n".join(merged_contents)}
+        return [merged_message] + messages[split_index:]
 
     def _coerce_text_fragment(self, value: Any) -> str:
         if isinstance(value, str):
@@ -601,7 +651,11 @@ class ResponsesShim:
     def _normalize_usage(usage: Any) -> Dict[str, Any]:
         payload = dict(usage or {}) if isinstance(usage, dict) else {}
         input_tokens = payload.get("input_tokens")
+        if input_tokens is None:
+            input_tokens = payload.get("prompt_tokens")
         output_tokens = payload.get("output_tokens")
+        if output_tokens is None:
+            output_tokens = payload.get("completion_tokens")
         total_tokens = payload.get("total_tokens")
         if input_tokens is None and output_tokens is None and total_tokens is None:
             return {}
@@ -676,13 +730,21 @@ class ResponsesShim:
 
         async def _generator() -> AsyncIterator[bytes]:
             text_parts: list[str] = []
+            tool_calls: Dict[int, Dict[str, Any]] = {}
             async for chunk in source:
                 for payload in self._extract_sse_payloads(chunk):
                     delta_text = self._extract_chat_delta(payload)
                     if delta_text:
                         text_parts.append(delta_text)
+                    self._capture_stream_tool_calls(tool_calls, payload)
                     self._capture_stream_usage(usage, payload.get("usage"))
-            final_body = self._build_stream_response_body(model, response_id, "".join(text_parts), usage)
+            final_body = self._build_stream_response_body(
+                model,
+                response_id,
+                "".join(text_parts),
+                usage,
+                [tool_calls[index] for index in sorted(tool_calls)] if tool_calls else None,
+            )
             for payload in self._build_response_stream_events(final_body):
                 yield self._encode_sse(payload)
             yield b"data: [DONE]\n\n"
@@ -690,9 +752,17 @@ class ResponsesShim:
         return _generator()
 
     def _build_stream_response_body(
-        self, model: Optional[str], response_id: str, text: str, usage: Dict[str, Any]
+        self,
+        model: Optional[str],
+        response_id: str,
+        text: str,
+        usage: Dict[str, Any],
+        tool_calls: Optional[list[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        base = {"id": response_id, "choices": [{"message": {"role": "assistant", "content": text}}]}
+        message: Dict[str, Any] = {"role": "assistant", "content": text}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        base = {"id": response_id, "choices": [{"message": message}]}
         if usage:
             base["usage"] = usage
         return self._normalize_chat_response(model, base)
@@ -918,16 +988,82 @@ class ResponsesShim:
                 fragments.append(self._coerce_text_fragment(content))
             elif isinstance(content, str):
                 fragments.append(content)
+            if fragments:
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            message_content = message.get("content")
+            if isinstance(message_content, list):
+                for item in message_content:
+                    fragments.append(self._coerce_text_fragment(item))
+            elif isinstance(message_content, dict):
+                fragments.append(self._coerce_text_fragment(message_content))
+            elif isinstance(message_content, str):
+                fragments.append(message_content)
         return "".join(fragments)
 
     @staticmethod
     def _capture_stream_usage(storage: Dict[str, Any], usage: Any) -> None:
         if not isinstance(usage, dict):
             return
-        for key in ("input_tokens", "output_tokens", "total_tokens"):
-            value = usage.get(key)
-            if isinstance(value, (int, float)):
-                storage[key] = value
+        aliases = {
+            "input_tokens": ("input_tokens", "prompt_tokens"),
+            "output_tokens": ("output_tokens", "completion_tokens"),
+            "total_tokens": ("total_tokens",),
+        }
+        for target_key, candidate_keys in aliases.items():
+            for candidate_key in candidate_keys:
+                value = usage.get(candidate_key)
+                if isinstance(value, (int, float)):
+                    storage[target_key] = value
+                    break
+
+    @classmethod
+    def _capture_stream_tool_calls(cls, storage: Dict[int, Dict[str, Any]], payload: Dict[str, Any]) -> None:
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            return
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") or {}
+            for entry in delta.get("tool_calls") or []:
+                if isinstance(entry, dict):
+                    cls._merge_tool_call_fragment(storage, entry)
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            for entry in message.get("tool_calls") or []:
+                if isinstance(entry, dict):
+                    cls._merge_tool_call_fragment(storage, entry)
+
+    @staticmethod
+    def _merge_tool_call_fragment(storage: Dict[int, Dict[str, Any]], entry: Dict[str, Any]) -> None:
+        index = entry.get("index")
+        if not isinstance(index, int):
+            index = max(storage.keys(), default=-1) + 1
+        builder = storage.setdefault(
+            index,
+            {
+                "id": entry.get("id"),
+                "type": entry.get("type", "function"),
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        if entry.get("id"):
+            builder["id"] = entry["id"]
+        builder["type"] = entry.get("type", builder.get("type", "function"))
+        fn = entry.get("function") or {}
+        function_builder = builder.setdefault("function", {"name": "", "arguments": ""})
+        if fn.get("name"):
+            function_builder["name"] = fn["name"]
+        if fn.get("arguments"):
+            arguments_fragment = fn["arguments"]
+            if not isinstance(arguments_fragment, str):
+                arguments_fragment = json.dumps(arguments_fragment)
+            existing = function_builder.get("arguments", "")
+            function_builder["arguments"] = existing + arguments_fragment
 
 
 __all__ = [
